@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sinnema · Generador de series de micro-videos</title>
+<style>
+:root { --bg:#0f1115; --panel:#171a21; --line:#262b36; --tx:#e8eaf0;
+        --tx2:#9aa3b5; --ac:#7aa2ff; --ok:#5ad19a; --err:#f07a7a; }
+* { box-sizing:border-box; margin:0; }
+body { background:var(--bg); color:var(--tx);
+       font:15px/1.55 -apple-system,'Segoe UI',Roboto,sans-serif;
+       max-width:720px; margin:0 auto; padding:36px 20px 80px; }
+h1 { font-size:1.45rem; } h1 span { color:var(--ac); }
+.sub { color:var(--tx2); margin:4px 0 28px; }
+.card { background:var(--panel); border:1px solid var(--line); border-radius:14px;
+        padding:22px; margin-bottom:20px; }
+label { display:block; font-size:.8rem; color:var(--tx2); margin:14px 0 5px; }
+label:first-child { margin-top:0; }
+select,input,textarea { width:100%; background:#10131a; color:var(--tx);
+  border:1px solid var(--line); border-radius:8px; padding:9px 12px; font:inherit; }
+.row { display:flex; gap:14px; } .row>div { flex:1; }
+button { margin-top:18px; width:100%; background:var(--ac); color:#0b1020;
+  border:0; border-radius:10px; padding:12px; font:600 1rem inherit; cursor:pointer; }
+button:disabled { opacity:.5; cursor:default; }
+#progreso { display:none; }
+.log { background:#10131a; border:1px solid var(--line); border-radius:10px;
+       padding:12px 16px; max-height:280px; overflow-y:auto; font-size:.85rem;
+       color:var(--tx2); margin-top:12px; }
+.log div { padding:2px 0; border-bottom:1px solid var(--line); }
+.log div:last-child { border:0; }
+.estado { font-weight:600; }
+.estado.running { color:var(--ac); } .estado.completed { color:var(--ok); }
+.estado.failed { color:var(--err); }
+.acciones { display:flex; gap:12px; margin-top:14px; }
+.acciones a { flex:1; text-align:center; background:#10131a; border:1px solid var(--ac);
+  color:var(--ac); border-radius:10px; padding:10px; text-decoration:none; font-size:.9rem; }
+.hidden { display:none; }
+</style>
+</head>
+<body>
+<h1><span>Sinnema</span> · generador de series de micro-videos</h1>
+<p class="sub">Elegí un show, un tema y cuántos capítulos querés: el equipo de agentes
+planifica, escribe, audita y entrega la serie lista para producción.</p>
+
+<div class="card" id="formulario">
+  <label for="owner">Tu nombre o usuario</label>
+  <input id="owner" placeholder="anon" maxlength="60">
+
+  <label for="proyecto">Show (proyecto)</label>
+  <select id="proyecto"></select>
+
+  <label for="tema">Tema de la serie <span style="opacity:.6">(vacío = tema por defecto del show)</span></label>
+  <textarea id="tema" rows="2" placeholder="Ej: Fotosíntesis en 60 segundos"></textarea>
+
+  <div class="row">
+    <div>
+      <label for="capitulos">Capítulos</label>
+      <input id="capitulos" type="number" min="1" max="12" value="3">
+    </div>
+    <div>
+      <label for="reintentos">Reintentos de crítica máx.</label>
+      <input id="reintentos" type="number" min="1" max="5" value="2">
+    </div>
+  </div>
+
+  <button id="generar">Generar serie</button>
+</div>
+
+<div class="card hidden" id="progreso">
+  Estado: <span class="estado" id="estado">queued</span>
+  <div class="log" id="log"></div>
+  <div class="acciones hidden" id="acciones">
+    <a id="ver" target="_blank">Ver la serie</a>
+    <a id="descargar" target="_blank">Descargar JSON</a>
+    <a href="/" onclick="location.reload()">Nueva serie</a>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let proyectoElegido = null;
+
+fetch('/api/projects').then(r => r.json()).then(proyectos => {
+  $('proyecto').innerHTML = proyectos.map(p =>
+    `<option value="${p.project_id}">${p.brand_name} — ${p.default_topic}</option>`).join('');
+  $('proyecto').onchange = () => {
+    const p = proyectos.find(x => x.project_id === $('proyecto').value);
+    $('tema').placeholder = p ? 'Vacío = ' + p.default_topic : '';
+  };
+  $('proyecto').onchange();
+});
+
+$('generar').onclick = async () => {
+  $('generar').disabled = true;
+  const res = await fetch('/api/series', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Owner': $('owner').value || 'anon' },
+    body: JSON.stringify({
+      project_id: $('proyecto').value,
+      topic: $('tema').value.trim() || null,
+      num_chapters: parseInt($('capitulos').value, 10),
+      max_critique_attempts: parseInt($('reintentos').value, 10),
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({detail: res.statusText}));
+    $('generar').disabled = false;
+    alert('No se pudo crear la generación: ' + (err.detail || res.status));
+    return;
+  }
+  const { job_id } = await res.json();
+  seguir(job_id);
+};
+
+function seguir(job_id) {
+  $('formulario').classList.add('hidden');
+  $('progreso').classList.remove('hidden');
+  const log = $('log');
+  const agregar = msg => {
+    const linea = document.createElement('div');
+    linea.textContent = msg;
+    log.appendChild(linea);
+    log.scrollTop = log.scrollHeight;
+  };
+  const es = new EventSource(`/api/jobs/${job_id}/events`);
+  es.addEventListener('progress', e => agregar(e.data));
+  es.addEventListener('error', e => { if (e.data) agregar('✕ ' + e.data); });
+  es.addEventListener('done', () => es.close());
+  es.addEventListener('end', async () => {
+    es.close();
+    const job = await (await fetch(`/api/jobs/${job_id}`)).json();
+    $('estado').textContent = job.status;
+    $('estado').className = 'estado ' + job.status;
+    if (job.status === 'completed') {
+      $('ver').href = `/api/jobs/${job_id}/viewer`;
+      $('descargar').href = `/api/jobs/${job_id}/deliverable`;
+      $('acciones').classList.remove('hidden');
+    } else {
+      agregar('Error: ' + (job.error || 'desconocido'));
+    }
+  });
+  // Reflejar también el estado por si el cliente llega tarde al stream.
+  const poll = setInterval(async () => {
+    const job = await (await fetch(`/api/jobs/${job_id}`)).json();
+    $('estado').textContent = job.status;
+    $('estado').className = 'estado ' + job.status;
+    if (job.status === 'completed' || job.status === 'failed') clearInterval(poll);
+  }, 2000);
+}
+</script>
+</body>
+</html>

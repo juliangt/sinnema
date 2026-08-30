@@ -13,8 +13,22 @@ from typing import List
 
 from sinnema.application.projects import ProjectSpec, project_from_dict
 
-#: Directorio de proyectos por defecto: ``proyectos/`` en la raíz del repo.
-DEFAULT_PROJECTS_DIR = Path(__file__).resolve().parents[3] / "proyectos"
+def _resolve_projects_dir() -> Path:
+    """Directorio de proyectos en cascada: env var > repo > paquete instalado."""
+    import os
+
+    env = os.environ.get("SINNEMA_PROJECTS_DIR")
+    if env:
+        return Path(env)
+    repo = Path(__file__).resolve().parents[3] / "proyectos"
+    if repo.is_dir():
+        return repo
+    empaquetado = Path(__file__).resolve().parents[2] / "proyectos"
+    return empaquetado if empaquetado.is_dir() else repo
+
+
+#: Directorio de proyectos por defecto, resuelto al importar.
+DEFAULT_PROJECTS_DIR = _resolve_projects_dir()
 
 
 def list_projects(directorio: Path = DEFAULT_PROJECTS_DIR) -> List[ProjectSpec]:

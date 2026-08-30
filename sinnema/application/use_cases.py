@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import logging
-from typing import Iterator, Optional
+from typing import Any, Dict, Iterator, Optional
+
+from langgraph.checkpoint.base import BaseCheckpointSaver
 
 from sinnema.application.graph import build_pipeline_graph
 from sinnema.application.ports import (
@@ -62,13 +64,15 @@ class GenerateSeriesUseCase:
         settings: Optional[PipelineSettings] = None,
         audit: Optional[AuditTrailPort] = None,
         lore_store: Optional[LoreStorePort] = None,
+        checkpointer: Optional[BaseCheckpointSaver] = None,
     ) -> None:
         self._project = project
         self._settings = settings or PipelineSettings()
         self._audit = audit or NullAuditTrail()
         self._lore_store: LoreStorePort = lore_store or NullLoreStore()
         self._graph = build_pipeline_graph(
-            gateway, project, self._settings, audit=self._audit
+            gateway, project, self._settings, audit=self._audit,
+            checkpointer=checkpointer,
         )
 
     @staticmethod
@@ -79,11 +83,15 @@ class GenerateSeriesUseCase:
             6 + 3 * (request.max_critique_attempts + 1)
         )
 
-    def stream(self, request: SeriesRequest) -> Iterator[PipelineState]:
+    def stream(
+        self, request: SeriesRequest, thread_id: Optional[str] = None
+    ) -> Iterator[PipelineState]:
         """Ejecuta el grafo cediendo el estado tras cada superstep (progreso).
 
         Siembra el lore persistido del proyecto como memoria inicial de la
         corrida; usar ``save_lore`` al terminar para consolidar la memoria.
+        Con ``thread_id`` (y un checkpointer inyectado) el estado persiste y
+        la corrida es reanudable bajo ese hilo.
         """
         proyecto = request.project
         self._audit.log_step(
@@ -110,7 +118,11 @@ class GenerateSeriesUseCase:
                 "persistida(s) del proyecto."
             )
         estado_inicial = build_initial_state(request, initial_lore=lore_inicial)
-        config = {"recursion_limit": self._recursion_limit(request)}
+        config: Dict[str, Any] = {
+            "recursion_limit": self._recursion_limit(request)
+        }
+        if thread_id is not None:
+            config["thread_id"] = thread_id
         yield from self._graph.stream(estado_inicial, config=config, stream_mode="values")
 
     def save_lore(self, state: Optional[PipelineState]) -> None:

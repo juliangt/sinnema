@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional, Tuple
 
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
@@ -93,8 +94,13 @@ def build_pipeline_graph(
     project: ProjectSpec,
     settings: Optional[PipelineSettings] = None,
     audit: Optional[AuditTrailPort] = None,
+    checkpointer: Optional[BaseCheckpointSaver] = None,
 ) -> CompiledStateGraph:
-    """Compone y compila el grafo de estado cíclico para un proyecto."""
+    """Compone y compila el grafo de estado cíclico para un proyecto.
+
+    El ``checkpointer`` es opcional: presente, cada superstep persiste el
+    estado y una corrida puede reanudarse (thread_id = id de ejecución).
+    """
     settings = settings or PipelineSettings()
     audit = audit or NullAuditTrail()
     perfil = project.format
@@ -404,4 +410,4 @@ def build_pipeline_graph(
         {"next_chapter": "continuity_master", "series_complete": END},
     )
 
-    return workflow.compile()
+    return workflow.compile(checkpointer=checkpointer)

@@ -35,6 +35,7 @@ cada ejecución.
 15. [Estructura del repositorio](#15-estructura-del-repositorio)
 16. [Estrategia de pruebas](#16-estrategia-de-pruebas)
 17. [Puntos de extensión](#17-puntos-de-extensión)
+18. [Distribución: paquete, servicio web y multi-usuario](#18-distribución-paquete-servicio-web-y-multi-usuario)
 
 ---
 
@@ -488,3 +489,69 @@ testea con dobles porque solo conoce puertos.
 | Otro almacenamiento de lore/auditoría (BD, S3…) | Implementar `LoreStorePort` / `AuditTrailPort` — la aplicación no cambia |
 | Otra interfaz (API, web, cola) | Reutilizar `GenerateSeriesUseCase` y `build_deliverable`; la CLI es solo un cliente más |
 | Otra política de calidad | `PipelineSettings`: reintentos (1–5) y política de agotamiento (`force_accept` / `skip_chapter`) |
+
+---
+
+## 18. Distribución: paquete, servicio web y multi-usuario
+
+El motor se distribuye de dos formas sobre el mismo núcleo hexagonal.
+
+### Instalación como paquete
+
+```bash
+pip install sinnema            # o: pip install "sinnema[server]" para el servicio web
+sinnema --list-projects        # CLI completo, con los shows de ejemplo incluidos
+sinnema -p motores -t "Motores híbridos" -n 4
+```
+
+El paquete viaja con los proyectos de ejemplo; en despliegues se apunta a un
+directorio propio con `SINNEMA_PROJECTS_DIR=/ruta/a/proyectos`. Los shows en
+desarrollo se leen desde `proyectos/` en la raíz del repo (resolución en
+cascada: variable de entorno → repo → paquete).
+
+### Servicio web (API + UI)
+
+```bash
+pip install "sinnema[server]"
+sinnema-server                 # http://127.0.0.1:8000
+```
+
+La web (sirvida en `/`) permite elegir show, tema y capítulos, ver el
+progreso en vivo y abrir el visor HTML de la serie terminada. La API:
+
+| Endpoint | Qué hace |
+|---|---|
+| `GET /api/health` | Estado del servicio y del worker |
+| `GET /api/projects` | Shows disponibles |
+| `POST /api/series` | Crea un job de generación (202, devuelve `job_id`) |
+| `GET /api/jobs` | Jobs del usuario (header `X-Owner`) |
+| `GET /api/jobs/{id}` | Estado, error o entregable del job |
+| `GET /api/jobs/{id}/events` | Progreso en vivo (Server-Sent Events) |
+| `GET /api/jobs/{id}/deliverable` | JSON del `SeriesDeliverable` |
+| `GET /api/jobs/{id}/viewer` | Visor HTML de la serie |
+
+Variables de entorno del servicio: `SINNEMA_DATA_DIR` (raíz de jobs,
+checkpoints, auditoría, lore y salidas; por defecto `datos-servidor/`),
+`SINNEMA_HOST` y `SINNEMA_PORT`.
+
+### Modelo de ejecución y escalado
+
+- Los jobs viven en SQLite (`SqliteJobStore`), con aislamiento básico por
+  propietario (`X-Owner`); la autenticación real queda en la capa de
+  despliegue (reverse proxy + TLS + rate limiting).
+- Un worker en proceso (cola + hilo) ejecuta cada serie; los proveedores LLM
+  se resuelven una vez y se reutilizan entre jobs.
+- Cada corrida usa un **checkpointer SQLite de LangGraph** (un archivo por
+  job en `SINNEMA_DATA_DIR/checkpoints/`): el estado del grafo persiste tras
+  cada superstep y la corrida es reanudable.
+- Para escalar horizontalmente se reemplaza la cola por un broker
+  (Celery/RQ/SQS) y el hilo por workers separados: `SeriesWorker` ya aísla
+  store, gateway, auditoría, lore y checkpointer, y el núcleo no cambia.
+- Para multi-tenancy fuerte basta implementar `LoreStorePort` y
+  `AuditTrailPort` sobre una base de datos u object storage por usuario.
+
+### Empaquetado
+
+`pyproject.toml` (Hatchling) declara el paquete `sinnema`, los extras
+`[server]` y `[dev]`, los entry points `sinnema` y `sinnema-server`, y
+incluye `proyectos/*.toml` dentro de la wheel. Build: `python -m build`.
