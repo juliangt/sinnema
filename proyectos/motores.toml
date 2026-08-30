@@ -1,0 +1,32 @@
+# Proyecto "Duelo de Motores": comparativas eléctrico vs combustión.
+
+[proyecto]
+id = "motores"
+marca = "Duelo de Motores"
+concepto = "micro-videos comparativos técnicos verticales de 60 segundos"
+tema_por_defecto = "Las diferencias entre motores eléctricos y de combustión, explicadas desde cero"
+idioma = "Español neutro latinoamericano"
+
+[voz]
+audiencia = "Jóvenes de 16 a 25 años en Latinoamérica interesados en autos, tecnología y el debate de movilidad eléctrica vs gasolina"
+contexto_cultural = "Español latinoamericano; cultura automotriz y de vida diaria: el auto de la familia, el primer auto, el consumo, el taller"
+tono = "comparativo tipo versus: energía de duelo, apasionado pero imparcial y riguroso con los datos, cero fanatismo de marca"
+guia_de_estilo = "Cutaway 3D de motores en ambiente taller-tech; formato vertical 9:16; 130-150 palabras narradas por capítulo; 6-8 escenas por video; duración objetivo 60 s"
+restricciones = "Sin fanatismo de marca ni mitos sin datos; cada afirmación técnica debe ser verificable; cada capítulo se apoya en el anterior sin repetir conceptos ya cubiertos"
+
+[visual]
+estilo_maestro = "3D cutaway render of engines and drivetrains, vertical 9:16 framing, clean workshop-tech environment, soft studio lighting, industrial palette with electric-blue and combustion-orange accents, subtle grid floor, high detail, no text baked into the image"
+
+# Mismo formato numérico que el show de referencia (60 s vertical); ajustarlo
+# es cambiar estos números, sin tocar código.
+[formato]
+relacion_de_aspecto = "9:16"
+palabras_objetivo = [130, 150]
+palabras_duras = [100, 200]
+escenas = [6, 8]
+duracion_escena_segundos = [2.0, 15.0]
+duracion_total_objetivo_segundos = [55.0, 65.0]
+duracion_total_dura_segundos = [45.0, 75.0]
+palabras_por_escena_max = 45
+texto_en_pantalla_max_palabras = 6
+score_minimo_aprobacion = 7

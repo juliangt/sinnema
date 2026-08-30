@@ -1,0 +1,34 @@
+# Proyecto "Educativo": micro-videos educativos de IA para jóvenes.
+# Show original del motor; sus valores son la referencia del perfil por defecto.
+
+[proyecto]
+id = "educativo"
+marca = "Educativo"
+concepto = "micro-videos educativos verticales de 60 segundos"
+tema_por_defecto = "Los fundamentos de la inteligencia artificial explicados desde cero"
+idioma = "Español neutro latinoamericano"
+
+[voz]
+audiencia = "Adolescentes de 14 a 18 años en Latinoamérica, consumidores de contenido corto vertical (TikTok / Reels / Shorts)"
+contexto_cultural = "Español neutro latinoamericano con modismos orgánicos; referencias a cultura digital, escuela, gaming y vida diaria adolescente"
+tono = "cómplice y energético, riguroso pero nunca académico seco"
+guia_de_estilo = "Estética 3D isométrica tech; formato vertical 9:16; 130-150 palabras narradas por capítulo; 6-8 escenas por video; duración objetivo 60 s"
+restricciones = "Sin jerga ofensiva ni vulgaridad; precisión técnica intacta; cada capítulo se apoya en el anterior sin repetir conceptos ya cubiertos"
+
+[visual]
+estilo_maestro = "3D isometric render, vertical 9:16 framing, clean tech environment, soft studio lighting, pastel + neon accent palette, subtle grid floor, rounded minimalist props, high detail, no text baked into the image"
+
+# [formato] es opcional: sin esta sección rige el perfil por defecto
+# (show vertical de ~60 s con los límites históricos del motor).
+# Se declara explícito a modo de documentación viva del show.
+[formato]
+relacion_de_aspecto = "9:16"
+palabras_objetivo = [130, 150]
+palabras_duras = [100, 200]
+escenas = [6, 8]
+duracion_escena_segundos = [2.0, 15.0]
+duracion_total_objetivo_segundos = [55.0, 65.0]
+duracion_total_dura_segundos = [45.0, 75.0]
+palabras_por_escena_max = 45
+texto_en_pantalla_max_palabras = 6
+score_minimo_aprobacion = 7

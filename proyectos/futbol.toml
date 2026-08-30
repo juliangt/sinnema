@@ -1,0 +1,35 @@
+# Proyecto "Fútbol por Dentro": ciencia, táctica y datos del fútbol.
+# Tendencia: la candidatura conjunta y el Mundial 2026 en Norteamérica dejaron
+# a la audiencia latam enganchada al análisis táctico y de datos (xG, pressing);
+# el contenido "explicálo como si fuera un videojuego" es de los más virales.
+
+[proyecto]
+id = "futbol"
+marca = "Fútbol por Dentro"
+concepto = "micro-videos de táctica y datos del fútbol vertical de 60 segundos"
+tema_por_defecto = "Por qué un equipo con menos posesión puede ganar el partido"
+idioma = "Español neutro latinoamericano"
+
+[voz]
+audiencia = "Hincha de 14 a 30 años en Latinoamérica que ve todos los partidos y quiere entender lo que el comentarista no explica: táctica, datos y física del juego"
+contexto_cultural = "Español latinoamericano; la porra del barrio, los memes de redes tras cada jornada, las figuras del momento, el videojuego de fútbol como idioma compartido"
+tono = "analista apasionado: desmenuza el juego con datos y pizarras, emociona sin ser hincha de nadie"
+guia_de_estilo = "Pizarra táctica 3D sobre estadio cinematográfico; formato vertical 9:16; 130-150 palabras narradas por capítulo; 6-8 escenas por video; duración objetivo 60 s"
+restricciones = "Imparcialidad de club y selección; cada afirmación táctica o estadística debe ser verificable; cada capítulo se apoya en el anterior sin repetir conceptos ya cubiertos"
+
+[visual]
+estilo_maestro = "Cinematic 3D football tactics board floating over a stadium, vertical 9:16 framing, top-down pitch with glowing player markers and passing arrows, dramatic floodlights, deep green pitch with electric-yellow chalk lines, shallow depth of field, high detail, no text baked into the image"
+
+# Sobre de 60 s estándar; el techo de texto en pantalla baja a 5 palabras para
+# forzar pizarra visual limpia en vez de rótulos.
+[formato]
+relacion_de_aspecto = "9:16"
+palabras_objetivo = [130, 150]
+palabras_duras = [100, 200]
+escenas = [6, 8]
+duracion_escena_segundos = [2.0, 15.0]
+duracion_total_objetivo_segundos = [55.0, 65.0]
+duracion_total_dura_segundos = [45.0, 75.0]
+palabras_por_escena_max = 45
+texto_en_pantalla_max_palabras = 5
+score_minimo_aprobacion = 7

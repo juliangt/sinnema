@@ -1,0 +1,35 @@
+# Proyecto "Escudo Digital": cómo funcionan las estafas digitales.
+# Tendencia: las estafas asistidas por IA (phishing, deepfakes, la del hijo en
+# apuros por WhatsApp) crecieron sin freno; el contenido defensivo es de los
+# más compartido ("pásaselo a tus papás") y construye confianza de marca.
+
+[proyecto]
+id = "estafas"
+marca = "Escudo Digital"
+concepto = "micro-videos de defensa contra estafas digitales vertical de 60 segundos"
+tema_por_defecto = "La estafa del hijo en apuros por WhatsApp: cómo desenmascararla"
+idioma = "Español neutro latinoamericano"
+
+[voz]
+audiencia = "Familias latinoamericanas de 16 años en adelante: jóvenes que bancarizan a sus papás y adultos que reciben llamadas y mensajes sospechosos todos los días"
+contexto_cultural = "Español latinoamericano; el grupo de la familia en WhatsApp, la transferencia del sobrino, el puesto de telefonía, el falso premio, el anuncio que parece oficial"
+tono = "guardián práctico: muestra el truco por dentro para que nadie caiga, sereno y sin alarmismo"
+guia_de_estilo = "Ciberseguridad 3D elegante con teléfono, escudo y candado; formato vertical 9:16; 130-150 palabras narradas por capítulo; 6-8 escenas por video; duración objetivo 60 s"
+restricciones = "Solo defensa: nunca instrucciones paso a paso para ejecutar una estafa; los detalles sensibles (números, enlaces, herramientas) se anonimizan; cada mecanismo debe ser verificable; cada capítulo se apoya en el anterior sin repetir conceptos ya cubiertos"
+
+[visual]
+estilo_maestro = "Sleek 3D cybersecurity scene, vertical 9:16 framing, smartphone with glowing shield and padlock, phishing hooks and theater-mask motifs, dark navy environment with alert-red and cyber-cyan accents, soft rim lighting, subtle circuit floor, high detail, no text baked into the image"
+
+# Sobre de 60 s estándar; el score de aprobación sube a 8: describir una
+# estafa con exactitud es la parte crítica del show.
+[formato]
+relacion_de_aspecto = "9:16"
+palabras_objetivo = [130, 150]
+palabras_duras = [100, 200]
+escenas = [6, 8]
+duracion_escena_segundos = [2.0, 15.0]
+duracion_total_objetivo_segundos = [55.0, 65.0]
+duracion_total_dura_segundos = [45.0, 75.0]
+palabras_por_escena_max = 45
+texto_en_pantalla_max_palabras = 6
+score_minimo_aprobacion = 8

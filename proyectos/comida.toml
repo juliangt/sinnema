@@ -1,0 +1,35 @@
+# Proyecto "Etiqueta Negra": leer etiquetas y entender ultraprocesados.
+# Tendencia: los videos revisando etiquetas y desnudando ultraprocesados se
+# volvieron fenómeno en el corto vertical en español; alta compartibilidad ("a
+# esto le compras tú todos los días") y confianza en marca-persona.
+
+[proyecto]
+id = "comida"
+marca = "Etiqueta Negra"
+concepto = "micro-videos de lectura de etiquetas y alimentación vertical de 60 segundos"
+tema_por_defecto = "Cómo leer una etiqueta nutricional en 20 segundos y detectar azúcar escondido"
+idioma = "Español neutro latinoamericano"
+
+[voz]
+audiencia = "Personas de 18 a 40 años en Latinoamérica que hacen las compras de la casa y quieren comer mejor sin dietas extremas ni culpa"
+contexto_cultural = "Español latinoamericano; el súper del barrio y el mercado, los productos que siempre estuvieron en la alacena, el marketing light-natural-fortificado, la comida familiar"
+tono = "investigador del consumidor: revela lo que la etiqueta esconde con datos, sin terrorismo nutricional ni dietas milagro"
+guia_de_estilo = "Fotografía macro de alimento mezclada con pasillo de súper en 3D y lupa sobre etiquetas; formato vertical 9:16; 130-150 palabras narradas por capítulo; 6-8 escenas por video; duración objetivo 60 s"
+restricciones = "Ninguna prescripción médica ni dieta; no demonizar alimentos sin evidencia; cada afirmación nutricional debe ser verificable; cada capítulo se apoya en el anterior sin repetir conceptos ya cubiertos"
+
+[visual]
+estilo_maestro = "Hyperreal 3D grocery aisle blended with macro food photography, vertical 9:16 framing, magnifying glass hovering over nutrition labels, fresh produce beside packaged products, bright natural light, clean white and fresh-green palette with warning-red accents, high detail, no text baked into the image"
+
+# Sobre de 60 s estándar; el techo por escena baja a 40 palabras porque la
+# explicación de etiquetas va apoyada en imagen, no en narración densa.
+[formato]
+relacion_de_aspecto = "9:16"
+palabras_objetivo = [130, 150]
+palabras_duras = [100, 200]
+escenas = [6, 8]
+duracion_escena_segundos = [2.0, 15.0]
+duracion_total_objetivo_segundos = [55.0, 65.0]
+duracion_total_dura_segundos = [45.0, 75.0]
+palabras_por_escena_max = 40
+texto_en_pantalla_max_palabras = 6
+score_minimo_aprobacion = 7

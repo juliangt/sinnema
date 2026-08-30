@@ -1,0 +1,35 @@
+# Proyecto "Modo Enfoque": neurociencia de la atención y los hábitos.
+# Tendencia: el debate sobre el "cerebro sobreestimulado" (dopamina, scroll,
+# sueño) domina el wellness de corto vertical; la audiencia busca explicación
+# científica y rutinas accionables, no sermones.
+
+[proyecto]
+id = "enfoque"
+marca = "Modo Enfoque"
+concepto = "micro-videos de neurociencia de la atención vertical de 60 segundos"
+tema_por_defecto = "Por qué tu atención se agota: el ciclo de la dopamina desde cero"
+idioma = "Español neutro latinoamericano"
+
+[voz]
+audiencia = "Jóvenes de 16 a 25 años en Latinoamérica que sienten que no pueden concentrarse ni dormir bien, consumen contenido sobre dopamina y rutinas y desean entender su cerebro"
+contexto_cultural = "Español latinoamericano; el scroll infinito, los exámenes y la sesión de estudio, el teléfono en la mesa, el discurso de detox de dopamina y vida digital"
+tono = "calmo y curioso: explica la ciencia con calidez, jamás sermonea ni culpa a la audiencia"
+guia_de_estilo = "Neurociencia minimal en 3D con cerebro y trayectorias de luz; formato vertical 9:16; 120-145 palabras narradas por capítulo; 6-8 escenas por video; ritmo pausado; duración objetivo 60 s"
+restricciones = "Ningún consejo médico ni diagnóstico; cada mecanismo cerebral debe corresponder a ciencia establecida; cada capítulo se apoya en el anterior sin repetir conceptos ya cubiertos"
+
+[visual]
+estilo_maestro = "Minimal 3D render of a stylized human brain and neural pathways, vertical 9:16 framing, dark calm environment with soft glow, dopamine particles as light trails, indigo and warm amber palette, floating phone silhouettes, meditative atmosphere, high detail, no text baked into the image"
+
+# Sobre de 60 s con ritmo más pausado que el promedio: menos palabras por
+# guion y cortes mínimos de 3 s para transmitir calma.
+[formato]
+relacion_de_aspecto = "9:16"
+palabras_objetivo = [120, 145]
+palabras_duras = [100, 200]
+escenas = [6, 8]
+duracion_escena_segundos = [3.0, 15.0]
+duracion_total_objetivo_segundos = [55.0, 65.0]
+duracion_total_dura_segundos = [45.0, 75.0]
+palabras_por_escena_max = 45
+texto_en_pantalla_max_palabras = 6
+score_minimo_aprobacion = 7
