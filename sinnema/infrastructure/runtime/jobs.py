@@ -165,15 +165,25 @@ class SqliteJobStore:
             ).fetchone()
         return self._row_to_job(fila) if fila else None
 
-    def list_jobs(self, owner: Optional[str] = None) -> List[Job]:
+    def list_jobs(
+        self,
+        owner: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> List[Job]:
         consulta = "SELECT * FROM jobs"
-        params: tuple = ()
+        condiciones: List[str] = []
+        params: list = []
         if owner is not None:
-            consulta += " WHERE owner = ?"
-            params = (owner,)
+            condiciones.append("owner = ?")
+            params.append(owner)
+        if project_id is not None:
+            condiciones.append("project_id = ?")
+            params.append(project_id)
+        if condiciones:
+            consulta += " WHERE " + " AND ".join(condiciones)
         consulta += " ORDER BY created_at DESC"
         with self._lock:
-            filas = self._conn.execute(consulta, params).fetchall()
+            filas = self._conn.execute(consulta, tuple(params)).fetchall()
         return [self._row_to_job(f) for f in filas]
 
     def set_status(

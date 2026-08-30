@@ -516,15 +516,24 @@ pip install "sinnema[server]"
 sinnema-server                 # http://127.0.0.1:8000
 ```
 
-La web (sirvida en `/`) permite elegir show, tema y capítulos, ver el
-progreso en vivo y abrir el visor HTML de la serie terminada. La API:
+La web (sirvida en `/`) tiene tres pestañas: **Proyectos** (crear, editar,
+duplicar, eliminar, ver prompts compuestos y lore), **Generar serie** (elegir
+show, tema y capítulos, con progreso en vivo) y **Trabajos** (jobs con estado
+y enlaces al visor). La API:
 
 | Endpoint | Qué hace |
 |---|---|
 | `GET /api/health` | Estado del servicio y del worker |
-| `GET /api/projects` | Shows disponibles |
+| `GET /api/projects` | Shows disponibles (con `editable`) |
+| `GET /api/projects/{id}` | Definición cruda del proyecto (forma del TOML) |
+| `POST /api/projects` | Crea un proyecto (valida todo junto; 400 con problemas) |
+| `PUT /api/projects/{id}` | Sobreescribe un proyecto (id inmutable) |
+| `DELETE /api/projects/{id}` | Borra el archivo (409 si hay jobs activos) |
+| `GET /api/projects/{id}/prompts` | Vista previa de los prompts del sistema compuestos |
+| `GET/DELETE /api/projects/{id}/lore` | Ver / reiniciar la memoria de continuidad |
+| `GET /api/meta/roles` | Catálogo de agentes (desactivables, defaults LLM) |
 | `POST /api/series` | Crea un job de generación (202, devuelve `job_id`) |
-| `GET /api/jobs` | Jobs del usuario (header `X-Owner`) |
+| `GET /api/jobs` | Jobs del usuario (header `X-Owner`, filtro `?project_id=`) |
 | `GET /api/jobs/{id}` | Estado, error o entregable del job |
 | `GET /api/jobs/{id}/events` | Progreso en vivo (Server-Sent Events) |
 | `GET /api/jobs/{id}/deliverable` | JSON del `SeriesDeliverable` |
@@ -534,13 +543,49 @@ Variables de entorno del servicio: `SINNEMA_DATA_DIR` (raíz de jobs,
 checkpoints, auditoría, lore y salidas; por defecto `datos-servidor/`),
 `SINNEMA_HOST` y `SINNEMA_PORT`.
 
+### Gestión web de proyectos: los archivos son la fuente de verdad
+
+La web de gestión edita los mismos `proyectos/<id>.toml` que lee el pipeline
+(escritura atómica con `tomli-w`). Cada job carga el spec vigente desde disco
+al arrancar: cambiar un proyecto aplica a la próxima corrida, sin reiniciar.
+La spec completa del MVP está en [`docs/spec-gestion-web.md`](docs/spec-gestion-web.md);
+lo esencial del esquema:
+
+```toml
+[agentes.scriptwriter]          # planner, continuity, scriptwriter, adapter,
+reglas = ["Cerrar con dato verificable"]   # critic, technical_director
+temperatura = 0.9               # opcional (0.0-2.0)
+# proveedor / modelo            # opcional: override por rol
+
+[agentes.adapter]
+activo = false                  # desactiva el agente (planner y scriptwriter no)
+
+[pipeline]
+# intentos_maximos_de_critica = 3          # default cuando la corrida no lo fija
+# politica_al_agotar = "aceptar_forzado"   # o "saltar_capitulo"
+```
+
+- **Reglas**: se apendan al prompt del sistema del rol (bloque
+  `REGLAS ADICIONALES DEL PROYECTO`).
+- **Proveedor/modelo/temperatura**: precedencia **proyecto > entorno > default**;
+  los roles desactivados no necesitan proveedor ni clave.
+- **Desactivar un rol** cortocircuita su nodo sin llamar al LLM: `continuity`
+  avanza sin directivas (el lore sigue creciendo desde los conceptos clave),
+  `adapter` pasa el borrador tal cual (adaptación identidad), `critic` aprueba
+  sin dictamen (episodios sin score) y `technical_director` entrega sin specs
+  visuales. `planner` y `scriptwriter` son estructurales y no se desactivan.
+- El directorio escribible se resuelve `SINNEMA_PROJECTS_DIR` → `proyectos/`
+  del repo → `<SINNEMA_DATA_DIR>/proyectos`; el listado fusiona con los shows
+  empaquetados (editar uno de muestra escribe una copia local que gana por id).
+
 ### Modelo de ejecución y escalado
 
 - Los jobs viven en SQLite (`SqliteJobStore`), con aislamiento básico por
   propietario (`X-Owner`); la autenticación real queda en la capa de
   despliegue (reverse proxy + TLS + rate limiting).
-- Un worker en proceso (cola + hilo) ejecuta cada serie; los proveedores LLM
-  se resuelven una vez y se reutilizan entre jobs.
+- Un worker en proceso (cola + hilo) ejecuta cada serie; el gateway LLM se
+  construye **por job** con los overrides `[agentes.<rol>]` vigentes del
+  proyecto (así una edición del TOML aplica a la próxima corrida).
 - Cada corrida usa un **checkpointer SQLite de LangGraph** (un archivo por
   job en `SINNEMA_DATA_DIR/checkpoints/`): el estado del grafo persiste tras
   cada superstep y la corrida es reanudable.

@@ -21,6 +21,7 @@ from typing import Callable, Optional
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 
+from sinnema.application.projects import ProjectSpec
 from sinnema.application.requests import SeriesRequest
 from sinnema.application.settings import PipelineSettings
 from sinnema.application.use_cases import GenerateSeriesUseCase, build_deliverable
@@ -64,15 +65,19 @@ class SeriesWorker:
         checkpoint_dir: Path,
         audit_root: Path = Path("auditoria"),
         lore_root: Path = Path("continuidad"),
-        gateway_factory: Optional[Callable[[], object]] = None,
+        gateway_factory: Optional[Callable[["ProjectSpec"], object]] = None,
+        project_loader: Optional[Callable[[str], ProjectSpec]] = None,
     ) -> None:
         self._store = store
         self._checkpoint_dir = Path(checkpoint_dir)
         self._audit_root = Path(audit_root)
         self._lore_root = Path(lore_root)
+        #: Fábrica de gateway por proyecto: cada job aplica los overrides
+        #: ``[agentes.<rol>]`` vigentes en el TOML al momento de arrancar.
         self._gateway_factory = gateway_factory or build_gateway
+        #: Cargador de proyectos (el servicio inyecta el del almacén escribible).
+        self._project_loader = project_loader or load_project
         self._queue: "queue.Queue[str]" = queue.Queue()
-        self._gateway = None
         self._thread: Optional[threading.Thread] = None
 
     # --------------------------------- API ---------------------------------
@@ -129,7 +134,7 @@ class SeriesWorker:
             sink("error", f"La generación falló: {exc}")
 
     def _execute(self, job, sink: EventSink) -> dict:
-        proyecto = load_project(job.project_id)
+        proyecto = self._project_loader(job.project_id)
         request = SeriesRequest(
             project=proyecto,
             topic=job.topic if job.topic else None,
@@ -138,9 +143,8 @@ class SeriesWorker:
         )
         request.validate()
 
-        if self._gateway is None:
-            sink("progress", "Configurando proveedores LLM...")
-            self._gateway = self._gateway_factory()
+        sink("progress", "Configurando proveedores LLM del proyecto...")
+        gateway = self._gateway_factory(proyecto)
 
         marca = job.job_id
         audit = FilesystemAuditTrail(self._audit_root / job.project_id / f"serie_{marca}")
@@ -150,9 +154,12 @@ class SeriesWorker:
         try:
             checkpointer = SqliteSaver(conn)
             use_case = GenerateSeriesUseCase(
-                self._gateway, proyecto,
+                gateway, proyecto,
                 settings=PipelineSettings(
-                    max_critique_attempts=job.max_critique_attempts
+                    max_critique_attempts=job.max_critique_attempts,
+                    retry_exhaustion_policy=(
+                        proyecto.pipeline.politica_al_agotar or "force_accept"
+                    ),
                 ),
                 audit=audit, lore_store=lore_store, checkpointer=checkpointer,
             )

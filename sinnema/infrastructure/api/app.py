@@ -2,12 +2,19 @@
 
 Expone el caso de uso existente como producto distribuible:
 
-- ``POST /api/series``       crea un job de generación y lo encola,
-- ``GET  /api/jobs/{id}``    consulta el estado y el entregable,
-- ``GET  ``/api/jobs/{id}/events``  progreso en vivo (Server-Sent Events),
-- ``GET  /api/jobs/{id}/viewer``    visor HTML del entregable,
-- ``GET  /api/projects``     los shows disponibles,
-- ``GET  /``                 la interfaz web (formulario + progreso).
+- ``POST /api/series``               crea un job de generación y lo encola,
+- ``GET  /api/jobs/{id}``            consulta el estado y el entregable,
+- ``GET  /api/jobs/{id}/events``     progreso en vivo (Server-Sent Events),
+- ``GET  /api/jobs/{id}/viewer``     visor HTML del entregable,
+- ``GET  /api/projects``             los shows disponibles,
+- ``POST/PUT/DELETE /api/projects``  gestión de proyectos vía archivos TOML,
+- ``GET  /api/projects/{id}/prompts`` vista previa de prompts compuestos,
+- ``GET/DELETE /api/projects/{id}/lore`` memoria de continuidad,
+- ``GET  /api/meta/roles``           catálogo de agentes para el formulario,
+- ``GET  /``                         la interfaz web (gestión + generación).
+
+Los proyectos viven en archivos TOML (fuente de verdad): la API los lee y
+escribe con escritura atómica; cada job carga el spec vigente al arrancar.
 
 El aislamiento por usuario es básico (header ``X-Owner``): los listados se
 filtran por propietario. Autenticación real, rate limiting y TLS quedan para
@@ -31,10 +38,18 @@ from fastapi.responses import (
 )
 from pydantic import BaseModel, Field
 
+from sinnema.application.projects import ROLES_ESENCIALES
+from sinnema.application.prompts import build_role_system_prompts
 from sinnema.application.requests import MAX_CRITIQUE_ATTEMPTS_LIMIT
 from sinnema.domain.constants import SERIES_MAX_CHAPTERS
 from sinnema.infrastructure.api.viewer import render_deliverable_html
-from sinnema.infrastructure.projects import list_projects, load_project
+from sinnema.infrastructure.llm.providers import DEFAULT_ROLE_SPECS
+from sinnema.infrastructure.lore import JsonLoreStore
+from sinnema.infrastructure.projects import (
+    ProjectFileStore,
+    packaged_projects_dir,
+    resolve_writable_projects_dir,
+)
 from sinnema.infrastructure.runtime.jobs import (
     TERMINAL_STATUSES,
     Job,
@@ -59,23 +74,36 @@ class SeriesRequestBody(BaseModel):
     project_id: str = Field(..., min_length=1)
     topic: Optional[str] = Field(None, description="Vacío = tema por defecto del proyecto.")
     num_chapters: int = Field(3, ge=1, le=SERIES_MAX_CHAPTERS)
-    max_critique_attempts: int = Field(2, ge=1, le=MAX_CRITIQUE_ATTEMPTS_LIMIT)
+    max_critique_attempts: Optional[int] = Field(
+        None, ge=1, le=MAX_CRITIQUE_ATTEMPTS_LIMIT,
+        description="Vacío = default del proyecto (sección [pipeline]) o 2.",
+    )
 
 
 def create_app(
     store: Optional[SqliteJobStore] = None,
     worker: Optional[SeriesWorker] = None,
     data_dir: Optional[Path] = None,
+    project_store: Optional[ProjectFileStore] = None,
 ) -> FastAPI:
     """Fábrica de la aplicación (permite inyectar dobles en tests)."""
     data_dir = Path(data_dir) if data_dir else DEFAULT_DATA_DIR
     store = store or SqliteJobStore(data_dir / "jobs.sqlite")
+    if project_store is None:
+        escribible = resolve_writable_projects_dir(data_dir)
+        empaquetado = packaged_projects_dir()
+        project_store = ProjectFileStore(
+            escribible,
+            builtin_dir=empaquetado if empaquetado != escribible else None,
+        )
     worker = worker or SeriesWorker(
         store,
         checkpoint_dir=data_dir / "checkpoints",
         audit_root=data_dir / "auditoria",
         lore_root=data_dir / "continuidad",
+        project_loader=project_store.load,
     )
+    lore_store = JsonLoreStore(root=data_dir / "continuidad")
     worker.start()
 
     app = FastAPI(title="Sinnema", version="0.1.0",
@@ -89,6 +117,15 @@ def create_app(
         if job is None:
             raise HTTPException(404, f"No existe el job '{job_id}'.")
         return job
+
+    def _proyecto_o_404(project_id: str):
+        """Carga el ProjectSpec; 404 si no existe, 400 si el TOML es inválido."""
+        try:
+            return project_store.load(project_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     # --------------------------------- API ---------------------------------
 
@@ -106,36 +143,123 @@ def create_app(
             {
                 "project_id": p.project_id,
                 "brand_name": p.brand_name,
+                "concepto": p.show_concept,
                 "default_topic": p.default_topic,
                 "audience": p.audience,
                 "language": p.language,
+                "editable": project_store.is_editable(p.project_id),
             }
-            for p in list_projects()
+            for p in project_store.list_merged()
+        ]
+
+    @app.get("/api/projects/{project_id}")
+    def get_project(project_id: str) -> dict:
+        try:
+            crudo = project_store.read_raw(project_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        crudo["editable"] = project_store.is_editable(project_id)
+        return crudo
+
+    @app.post("/api/projects", status_code=201)
+    def create_project(cuerpo: dict) -> dict:
+        try:
+            spec = project_store.create(cuerpo)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except FileExistsError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {"project_id": spec.project_id, "creado": True}
+
+    @app.put("/api/projects/{project_id}")
+    def update_project(project_id: str, cuerpo: dict) -> dict:
+        try:
+            project_store.update(project_id, cuerpo)
+        except FileNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"project_id": project_id, "actualizado": True}
+
+    @app.delete("/api/projects/{project_id}")
+    def delete_project(project_id: str) -> dict:
+        activos = [
+            j for j in store.list_jobs(project_id=project_id)
+            if j.status in (JobStatus.QUEUED, JobStatus.RUNNING)
+        ]
+        if activos:
+            raise HTTPException(
+                409,
+                f"El proyecto '{project_id}' tiene {len(activos)} job(s) en cola "
+                "o en ejecución: esperá a que terminen antes de borrarlo.",
+            )
+        try:
+            project_store.delete(project_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        return {"project_id": project_id, "borrado": True}
+
+    @app.get("/api/projects/{project_id}/prompts")
+    def project_prompts(project_id: str) -> dict:
+        proyecto = _proyecto_o_404(project_id)
+        return build_role_system_prompts(proyecto)
+
+    @app.get("/api/projects/{project_id}/lore")
+    def project_lore(project_id: str) -> list[dict]:
+        _proyecto_o_404(project_id)
+        try:
+            entradas = lore_store.load(project_id)
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return [e.model_dump(mode="json") for e in entradas]
+
+    @app.delete("/api/projects/{project_id}/lore")
+    def reset_project_lore(project_id: str) -> dict:
+        _proyecto_o_404(project_id)
+        lore_store.save(project_id, [])
+        return {"project_id": project_id, "lore": []}
+
+    @app.get("/api/meta/roles")
+    def meta_roles() -> list[dict]:
+        return [
+            {
+                "rol": s.role,
+                "desactivable": s.role not in ROLES_ESENCIALES,
+                "proveedor": s.provider,
+                "modelo": s.model,
+                "temperatura": s.temperature,
+            }
+            for s in DEFAULT_ROLE_SPECS
         ]
 
     @app.post("/api/series", status_code=202)
     def create_series(cuerpo: SeriesRequestBody, x_owner: Optional[str] = Header(None)) -> dict:
-        try:
-            proyecto = load_project(cuerpo.project_id)
-        except RuntimeError as exc:
-            raise HTTPException(404, str(exc)) from exc
+        proyecto = _proyecto_o_404(cuerpo.project_id)
         tema = (cuerpo.topic or "").strip() or proyecto.default_topic
+        intentos = (
+            cuerpo.max_critique_attempts
+            if cuerpo.max_critique_attempts is not None
+            else (proyecto.pipeline.intentos_maximos_de_critica or 2)
+        )
         job = store.create_job(
             owner=_owner(x_owner),
             project_id=proyecto.project_id,
             topic=tema,
             num_chapters=cuerpo.num_chapters,
-            max_critique_attempts=cuerpo.max_critique_attempts,
+            max_critique_attempts=intentos,
         )
         worker.submit(job.job_id)
         return {"job_id": job.job_id, "status": job.status.value}
 
     @app.get("/api/jobs")
-    def jobs(x_owner: Optional[str] = Header(None)) -> list[dict]:
+    def jobs(
+        x_owner: Optional[str] = Header(None),
+        project_id: Optional[str] = None,
+    ) -> list[dict]:
         owner = _owner(x_owner)
         return [
             j.to_dict(with_deliverable=False)
-            for j in store.list_jobs(owner)
+            for j in store.list_jobs(owner, project_id=project_id)
             if j.owner == owner
         ]
 

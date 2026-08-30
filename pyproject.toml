@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Motor multi-proyecto que genera series de micro-videos verticales mediante un pipeline multi-agente de LLMs."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "Proprietary" }
+license = { text = "MIT" }
 authors = [{ name = "Julián Garcia Tuñón" }]
 keywords = ["llm", "langgraph", "video", "generacion", "multi-agente"]
 
@@ -22,6 +22,7 @@ dependencies = [
     "langchain-ollama>=0.2.0",
     "langgraph-checkpoint-sqlite>=2.0.0",
     "python-dotenv>=1.0.0",
+    "tomli-w>=1.0,<2.0",
 ]
 
 [project.optional-dependencies]
