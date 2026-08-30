@@ -8,7 +8,7 @@ forma append-only sin perder historia.
 from __future__ import annotations
 
 import operator
-from typing import Annotated, List, Optional, TypedDict
+from typing import Annotated, Any, Dict, List, Optional, TypedDict
 
 from sinnema.domain.models import (
     AdaptedScript,
@@ -21,6 +21,24 @@ from sinnema.domain.models import (
     SeriesPlan,
     TechnicalPackage,
 )
+
+
+def fusionar_por_clave(
+    actuales: Optional[Dict[str, Any]], nuevos: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Reducer de la pizarra: fusión por clave (no append).
+
+    Cada agente escribe su clave y la última gana; un valor ``None`` elimina
+    la clave (los nodos de cierre la usan para vaciar la pizarra al terminar
+    un capítulo, cosa que un dict vacío no logra con una fusión por clave).
+    """
+    fusion = dict(actuales or {})
+    for clave, valor in (nuevos or {}).items():
+        if valor is None:
+            fusion.pop(clave, None)
+        else:
+            fusion[clave] = valor
+    return fusion
 
 
 class PipelineState(TypedDict, total=False):
@@ -40,6 +58,9 @@ class PipelineState(TypedDict, total=False):
     constraints: str
     num_chapters: int
     max_critique_attempts: int
+    #: Último hito del pipeline que alcanza esta corrida (``[flujo].hasta``);
+    #: el consolidador lo estampa en el entregable.
+    alcance: str
 
     # ------------------------------------------------------------------
     # b) MACRO PLAN STATE: estructura global aprobada por el planificador
@@ -63,6 +84,10 @@ class PipelineState(TypedDict, total=False):
     pending_feedback: Optional[str]
     qa_verdict: Optional[QualityAudit]
     technical_package: Optional[TechnicalPackage]
+    #: Pizarra genérica del capítulo: adjuntos de enriquecedores y notas de
+    #: agentes sin slot canónico. ``commit_episode`` los embute en el episodio
+    #: (``adjuntos``) y la vacía para el capítulo siguiente.
+    artefactos: Annotated[Dict[str, Any], fusionar_por_clave]
 
     # ------------------------------------------------------------------
     # e) OUTPUT ARTIFACTS: entidades terminadas y aprobadas

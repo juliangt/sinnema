@@ -1,20 +1,24 @@
 """Orquestación del pipeline multi-agente como grafo LangGraph cíclico.
 
-Topología del grafo (cíclica):
+Topología del grafo se resuelve desde el flujo efectivo del proyecto
+(``resolver_flujo``): composición de fases + corte por el hito ``hasta``:
 
     START
-      -> plan_series            (Strategic Planner)
-      -> continuity_master      (Lore Keeper)
-      -> scriptwriter           (Content Creator)
-      -> persona_adapter        (Audience Adapter)
-      -> chief_critic           (Auditor)
-           |-- revise ----------> scriptwriter   (ciclo de crítica con feedback)
-           |-- force_accept ----> technical_director
-           |-- skip_chapter ----> fail_chapter   (política de reintentos agotados)
-      -> technical_director     (Visual/Audio Director)
-      -> commit_episode         (consolida episodio + actualiza lore)
-           |-- next_chapter ----> continuity_master
+      -> plan_series                        (Strategic Planner, nivel de serie)
+      -> [contexto]*                        (Lore Keeper, ...)
+      -> scriptwriter                       (Content Creator, escritor)
+      -> [transformaciones]*                (Audience Adapter, ...)
+      -> (chief_critic                      (Auditor, compuerta opcional)
+            |-- revise ----> scriptwriter   (ciclo de crítica con feedback)
+            |-- approve ---> enriquecedores | commit
+            |-- skip_chapter -> fail_chapter (reintentos agotados))?
+      -> [enriquecedores]*                  (Visual/Audio Director, ...)
+      -> commit_episode                     (consolida episodio + actualiza lore)
+           |-- next_chapter ---> primer nodo del capítulo
            |-- series_complete -> END
+
+Con ``hasta = "plan"`` no hay bucle de capítulos: ``START -> plan_series ->
+consolidar_plan -> END`` (el entregable es el outline sin episodios).
 
 El grafo se compila POR PROYECTO: los nodos cierran sobre el ``ProjectSpec``
 (prompts del rol + sobre editorial ``FormatProfile``).
@@ -24,9 +28,9 @@ partir de su ``AgentDefinition`` (``sinnema.application.registry``), que
 declara mensajes, validadores de dominio, cortocircuitos y actualizaciones de
 estado. Quedan escritos a mano solo los nodos ESTRUCTURALES —``plan_series``,
 la compuerta de revisión (``chief_critic`` y sus aristas condicionales),
-``commit_episode`` y ``fail_chapter``— porque encapsulan semántica del
-pipeline (iterador de capítulos, política de agotamiento, ensamblado del
-entregable), no la de un agente en particular.
+``commit_episode``, ``fail_chapter`` y ``consolidar_plan``— porque encapsulan
+semántica del pipeline (iterador de capítulos, política de agotamiento,
+ensamblado del entregable), no la de un agente en particular.
 """
 from __future__ import annotations
 
@@ -36,10 +40,9 @@ from typing import Any, Dict, Optional
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
+from pydantic import BaseModel
 
 from sinnema.application.ports import (
-    ROLE_ADAPTER,
-    ROLE_CONTINUITY,
     ROLE_CRITIC,
     ROLE_DIRECTOR,
     ROLE_PLANNER,
@@ -48,7 +51,7 @@ from sinnema.application.ports import (
     NullAuditTrail,
     StructuredGenerationPort,
 )
-from sinnema.application.projects import ProjectSpec
+from sinnema.application.projects import ProjectSpec, resolver_flujo
 from sinnema.application.registry import (
     AGENT_REGISTRY,
     AgentDefinition,
@@ -57,6 +60,7 @@ from sinnema.application.registry import (
 )
 from sinnema.application.settings import PipelineSettings
 from sinnema.application.state import PipelineState
+from sinnema.domain.models import ArtefactoAdjunto
 from sinnema.domain.services import (
     assemble_episode,
     build_failed_record,
@@ -125,6 +129,50 @@ def make_agent_node(
         return actualizacion
 
     return _nodo_agente
+
+
+def _serializar_adjunto(artefacto: Any) -> Dict[str, Any]:
+    """Artefacto del estado en JSON ( BaseModel -> dict; dict -> tal cual)."""
+    if isinstance(artefacto, BaseModel):
+        return artefacto.model_dump(mode="json")
+    if isinstance(artefacto, dict):
+        return artefacto
+    raise TypeError(
+        f"La pizarra solo guarda contratos validados (BaseModel) o JSON "
+        f"dict; recibido: {type(artefacto).__name__}."
+    )
+
+
+def _adjuntos_del_estado(
+    state: PipelineState,
+    *,
+    paquete: Optional[Any],
+    dictamen: Optional[Any],
+) -> list:
+    """Adjuntos del episodio: specs, dictamen y artefactos de la pizarra.
+
+    ``technical`` y ``audit`` se mantienen como campos propios por
+    compatibilidad y además figuran en ``adjuntos`` cuando existen; los
+    artefactos de los enriquecedores sin slot canónico viajan solo aquí.
+    """
+    adjuntos = []
+    if paquete is not None:
+        adjuntos.append(
+            ArtefactoAdjunto(
+                rol=ROLE_DIRECTOR, artefacto=_serializar_adjunto(paquete)
+            )
+        )
+    if dictamen is not None:
+        adjuntos.append(
+            ArtefactoAdjunto(
+                rol=ROLE_CRITIC, artefacto=_serializar_adjunto(dictamen)
+            )
+        )
+    for clave, artefacto in sorted((state.get("artefactos") or {}).items()):
+        adjuntos.append(
+            ArtefactoAdjunto(rol=clave, artefacto=_serializar_adjunto(artefacto))
+        )
+    return adjuntos
 
 
 def build_pipeline_graph(
@@ -223,15 +271,25 @@ def build_pipeline_graph(
         return actualizacion
 
     def _commit_episode(state: PipelineState) -> Dict[str, Any]:
-        """Consolida el episodio aprobado, actualiza lore y avanza el índice."""
+        """Consolida el episodio aprobado, actualiza lore y avanza el índice.
+
+        El guion final es el vigente al momento del commit: si el flujo cortó
+        antes de las transformaciones, ``assemble_episode`` aplica la
+        adaptación identidad sobre el borrador. Los adjuntos del episodio
+        reúnen los artefactos de los enriquecedores (slots canónicos +
+        pizarra) serializados en JSON.
+        """
         _, capitulo, indice = capitulo_actual(state)
+        paquete = state.get("technical_package")
+        dictamen = state.get("qa_verdict")
         episodio = assemble_episode(
             chapter=capitulo,
             order_index=indice + 1,
             draft=state["draft_script"],
-            adapted=state["adapted_script"],
-            package=state["technical_package"],
-            audit=state["qa_verdict"],
+            adapted=state.get("adapted_script"),
+            package=paquete,
+            audit=dictamen,
+            adjuntos=_adjuntos_del_estado(state, paquete=paquete, dictamen=dictamen),
         )
         lore_nuevo = extract_new_lore(
             capitulo, state.get("continuity_directives"), state.get("lore_entries", [])
@@ -260,6 +318,9 @@ def build_pipeline_graph(
             "qa_verdict": None,
             "technical_package": None,
             "continuity_directives": None,
+            # None borra las claves de la pizarra (reducer fusionar_por_clave):
+            # los adjuntos ya viajan dentro del episodio consolidado.
+            "artefactos": {clave: None for clave in (state.get("artefactos") or {})},
         }
 
     def _fail_chapter(state: PipelineState) -> Dict[str, Any]:
@@ -295,6 +356,25 @@ def build_pipeline_graph(
             "continuity_directives": None,
         }
 
+    def _consolidar_plan(state: PipelineState) -> Dict[str, Any]:
+        """Cierre de la corrida con ``hasta = 'plan'``: outline sin episodios.
+
+        Nodo estructural: no hay bucle de capítulos ni lore; el consolidador
+        del caso de uso arma el entregable con el plan y cero episodios.
+        """
+        plan = state["series_plan"]
+        logger.info(
+            "Alcance 'plan': outline de %d capítulo(s) sin episodios.",
+            len(plan.chapters),
+        )
+        audit.log_step(
+            "consolidar_plan",
+            f"Alcance 'plan': serie planificada con {len(plan.chapters)} "
+            "capítulo(s); la corrida termina sin guiones ni episodios.",
+            details=[f"{c.chapter_id}: {c.title}" for c in plan.chapters],
+        )
+        return {}
+
     # ------------------------ ARISTAS CONDICIONALES ------------------------
 
     def _route_after_critic(state: PipelineState) -> str:
@@ -317,52 +397,100 @@ def build_pipeline_graph(
 
     # ----------------------------- GRAFO -----------------------------
 
-    workflow = StateGraph(PipelineState)
+    flujo = resolver_flujo(project)
 
-    # El orden de add_node replica la declaración histórica: estable para el
-    # diagrama (ver_grafo) y para la serialización del checkpointer.
-    workflow.add_node("plan_series", _plan_series)
-    for rol in (ROLE_CONTINUITY, ROLE_SCRIPTWRITER, ROLE_ADAPTER):
+    def _agregar_agente(rol: str) -> str:
+        """Registra el nodo del rol (nombre estable) y devuelve su nombre."""
         definicion = AGENT_REGISTRY[rol]
         workflow.add_node(
             definicion.nodo,
             make_agent_node(definicion, gateway, project, system_prompts, audit),
         )
-    workflow.add_node("chief_critic", _chief_critic)
-    director = AGENT_REGISTRY[ROLE_DIRECTOR]
-    workflow.add_node(
-        director.nodo,
-        make_agent_node(director, gateway, project, system_prompts, audit),
-    )
-    workflow.add_node("commit_episode", _commit_episode)
-    workflow.add_node("fail_chapter", _fail_chapter)
+        return definicion.nodo
 
+    workflow = StateGraph(PipelineState)
+    workflow.add_node("plan_series", _plan_series)
+
+    if flujo.hasta == "plan":
+        # Sin bucle de capítulos: planificar la serie y consolidar el outline.
+        workflow.add_node("consolidar_plan", _consolidar_plan)
+        workflow.add_edge("plan_series", "consolidar_plan")
+        workflow.add_edge("consolidar_plan", END)
+        return workflow.compile(checkpointer=checkpointer)
+
+    # Cableado por fases: el cursor avanza por el último nodo lineal y la
+    # entrada del capítulo marca el regreso de next_chapter. El orden de
+    # add_node/add_edge replica la declaración histórica: estable para el
+    # diagrama (ver_grafo) y para la serialización del checkpointer.
     workflow.add_edge(START, "plan_series")
-    workflow.add_edge("plan_series", "continuity_master")
-    workflow.add_edge("continuity_master", "scriptwriter")
-    workflow.add_edge("scriptwriter", "persona_adapter")
-    workflow.add_edge("persona_adapter", "chief_critic")
+    cursor = "plan_series"
+    entrada_capitulo: Optional[str] = None
+    for rol in flujo.contexto:
+        nodo = _agregar_agente(rol)
+        workflow.add_edge(cursor, nodo)
+        cursor = nodo
+        if entrada_capitulo is None:
+            entrada_capitulo = nodo
 
-    workflow.add_conditional_edges(
-        "chief_critic",
-        _route_after_critic,
-        {
-            "revise": "scriptwriter",
-            "approve": "technical_director",
-            "skip_chapter": "fail_chapter",
-        },
-    )
+    nodo_escritor = _agregar_agente(ROLE_SCRIPTWRITER)
+    workflow.add_edge(cursor, nodo_escritor)
+    cursor = nodo_escritor
+    if entrada_capitulo is None:
+        entrada_capitulo = nodo_escritor
 
-    workflow.add_edge("technical_director", "commit_episode")
-    workflow.add_conditional_edges(
-        "fail_chapter",
-        _route_after_commit,
-        {"next_chapter": "continuity_master", "series_complete": END},
-    )
+    for rol in flujo.transformaciones:
+        nodo = _agregar_agente(rol)
+        workflow.add_edge(cursor, nodo)
+        cursor = nodo
+
+    ultimo_enriquecedor: Optional[str] = None
+    if flujo.revisor is not None:
+        workflow.add_node("chief_critic", _chief_critic)
+        workflow.add_edge(cursor, "chief_critic")
+        primero: Optional[str] = None
+        anterior: Optional[str] = None
+        for rol in flujo.enriquecimiento:
+            nodo = _agregar_agente(rol)
+            if primero is None:
+                primero = nodo
+            else:
+                workflow.add_edge(anterior, nodo)
+            anterior = nodo
+        workflow.add_conditional_edges(
+            "chief_critic",
+            _route_after_critic,
+            {
+                "revise": nodo_escritor,
+                "approve": primero or "commit_episode",
+                "skip_chapter": "fail_chapter",
+            },
+        )
+        ultimo_enriquecedor = anterior
+        if anterior is not None:
+            cursor = anterior
+        else:
+            cursor = None  # commit recibe el approve de la compuerta
+    else:
+        for rol in flujo.enriquecimiento:
+            nodo = _agregar_agente(rol)
+            workflow.add_edge(cursor, nodo)
+            cursor = nodo
+
+    workflow.add_node("commit_episode", _commit_episode)
+    if cursor is not None:
+        workflow.add_edge(cursor, "commit_episode")
+
+    if flujo.revisor is not None:
+        workflow.add_node("fail_chapter", _fail_chapter)
+        workflow.add_conditional_edges(
+            "fail_chapter",
+            _route_after_commit,
+            {"next_chapter": entrada_capitulo, "series_complete": END},
+        )
     workflow.add_conditional_edges(
         "commit_episode",
         _route_after_commit,
-        {"next_chapter": "continuity_master", "series_complete": END},
+        {"next_chapter": entrada_capitulo, "series_complete": END},
     )
 
     return workflow.compile(checkpointer=checkpointer)

@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
 from sinnema.domain.constants import (
+    ALCANCES,
+    ALCANCE_COMPUERTA,
     SCENE_DURATION_UNIVERSAL_MAX_SECONDS,
     SCENE_DURATION_UNIVERSAL_MIN_SECONDS,
     SCENES_UNIVERSAL_MAX_COUNT,
@@ -21,6 +23,9 @@ from sinnema.domain.models.technical import TechnicalPackage
 
 #: Tolerancia al comparar el promedio declarado con el recalculado (redondeo a 2 decimales).
 _AVERAGE_TOLERANCE = 0.011
+
+#: Vocabulario cerrado del alcance de un entregable (hitos del pipeline).
+Alcance = Literal["plan", "guion", "guion_final", "auditado", "produccion"]
 
 
 class FinalScene(BaseModel):
@@ -47,6 +52,23 @@ class FinalScene(BaseModel):
     )
 
 
+class ArtefactoAdjunto(BaseModel):
+    """Adjunto de un agente (p. ej. un enriquecedor) al episodio, en JSON.
+
+    Los adjuntos acompañan al episodio sin alterar sus slots canónicos
+    (``technical`` y ``audit`` siguen siendo campos propios por compatibilidad;
+    además figuran aquí, y lo mismo vale para cualquier artefacto de la
+    pizarra del estado producido por un enriquecedor).
+    """
+
+    rol: str = Field(
+        ..., min_length=1, description="Rol del agente que produjo el artefacto."
+    )
+    artefacto: Dict[str, Any] = Field(
+        ..., description="Artefacto serializado (JSON), ya validado por su contrato."
+    )
+
+
 class ApprovedEpisode(BaseModel):
     """Episodio terminado y aprobado, listo para producción/render."""
 
@@ -67,6 +89,13 @@ class ApprovedEpisode(BaseModel):
     audit: Optional[QualityAudit] = Field(
         default=None,
         description="None = proyecto sin auditor QA (episodio sin dictamen).",
+    )
+    adjuntos: List[ArtefactoAdjunto] = Field(
+        default_factory=list,
+        description=(
+            "Artefactos integrables que viajan con el episodio (specs, dictamen, "
+            "adjuntos de enriquecedores), serializados en JSON."
+        ),
     )
     forced_acceptance: bool = Field(
         default=False,
@@ -108,7 +137,7 @@ class FailedChapterRecord(BaseModel):
 class SeriesDeliverable(BaseModel):
     """Contrato final de salida para APIs, motores de render o persistencia."""
 
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["1.1"] = "1.1"
     project_id: str = Field(
         ...,
         min_length=1,
@@ -119,6 +148,14 @@ class SeriesDeliverable(BaseModel):
     topic: str
     audience: str
     style_guide: str
+    alcance: Alcance = Field(
+        default="produccion",
+        description=(
+            "Último hito del pipeline que alcanzó esta corrida: 'plan' entrega "
+            "el outline sin episodios; 'guion_final' entrega la serie sin specs "
+            "de video; 'produccion' es el paquete completo."
+        ),
+    )
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     total_chapters_planned: int = Field(..., ge=0)
     episodes: List[ApprovedEpisode] = Field(default_factory=list)
@@ -164,5 +201,16 @@ class SeriesDeliverable(BaseModel):
             raise ValueError(
                 f"average_quality_score ({self.average_quality_score}) no coincide con "
                 f"el promedio recalculado de los episodios ({esperado})."
+            )
+
+        # 4) Coherencia alcance ↔ fallos: si hay capítulos descartados hubo
+        #    compuerta de calidad, así que el alcance es 'auditado' o superior.
+        if self.failed_chapters and ALCANCES.index(self.alcance) < ALCANCES.index(
+            ALCANCE_COMPUERTA
+        ):
+            raise ValueError(
+                f"El alcance '{self.alcance}' no puede reportar capítulos "
+                f"descartados: los fallos exigen compuerta de calidad "
+                f"('{ALCANCE_COMPUERTA}' o '{ALCANCES[-1]}')."
             )
         return self

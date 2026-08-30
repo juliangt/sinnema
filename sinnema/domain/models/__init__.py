@@ -14,6 +14,7 @@ from sinnema.domain.models.content import (
 from sinnema.domain.models.continuity import ContinuityDirectives, LoreEntry
 from sinnema.domain.models.deliverable import (
     ApprovedEpisode,
+    ArtefactoAdjunto,
     FailedChapterRecord,
     FinalScene,
     SeriesDeliverable,

@@ -14,10 +14,11 @@ from sinnema.application.ports import (
     NullLoreStore,
     StructuredGenerationPort,
 )
-from sinnema.application.projects import ProjectSpec
+from sinnema.application.projects import ProjectSpec, resolver_flujo
 from sinnema.application.requests import SeriesRequest, build_initial_state
 from sinnema.application.settings import PipelineSettings
 from sinnema.application.state import PipelineState
+from sinnema.domain.constants import ALCANCE_DEFAULT
 from sinnema.domain.exceptions import DomainValidationError
 from sinnema.domain.models import SeriesDeliverable
 from sinnema.domain.services import merge_lore
@@ -49,11 +50,35 @@ def build_deliverable(state: Optional[PipelineState]) -> SeriesDeliverable:
         topic=state["topic"],
         audience=state["audience"],
         style_guide=state["style_guide"],
+        alcance=state.get("alcance", ALCANCE_DEFAULT),
         total_chapters_planned=len(plan.chapters),
         episodes=episodios,
         failed_chapters=state.get("failed_chapters", []),
         average_quality_score=promedio,
         lore_glossary=state.get("lore_entries", []),
+    )
+
+
+def limite_de_recursion(flujo, num_chapters: int, max_attempts: int) -> int:
+    """Margen de pasos del grafo, derivado del flujo efectivo (§6.3).
+
+    ``pasos_por_capitulo`` cubre el camino mínimo (contextos -> escritor ->
+    transformaciones -> compuerta -> enriquecedores -> commit) y
+    ``extra_por_reintento`` el ciclo de crítica (escritor -> ... -> revisor).
+    """
+    pasos_por_capitulo = (
+        len(flujo.contexto)
+        + 1  # escritor
+        + len(flujo.transformaciones)
+        + (1 if flujo.revisor is not None else 0)
+        + len(flujo.enriquecimiento)
+        + 1  # commit
+    )
+    extra_por_reintento = 1 + len(flujo.transformaciones) + 1  # escritor->..->revisor
+    return (
+        10
+        + num_chapters * pasos_por_capitulo
+        + num_chapters * (max_attempts + 1) * extra_por_reintento
     )
 
 
@@ -80,10 +105,12 @@ class GenerateSeriesUseCase:
 
     @staticmethod
     def _recursion_limit(request: SeriesRequest) -> int:
-        """Margen de pasos del grafo: plan + (nodos por capítulo) x capítulos,
-        ampliado por el ciclo de crítica de cada capítulo."""
-        return 10 + request.num_chapters * (
-            6 + 3 * (request.max_critique_attempts + 1)
+        """Margen de pasos del grafo: fórmula generalizada desde el flujo
+        efectivo del proyecto (plan + capítulos + ciclos de crítica)."""
+        return limite_de_recursion(
+            resolver_flujo(request.project),
+            request.num_chapters,
+            request.max_critique_attempts,
         )
 
     def stream(
@@ -97,6 +124,7 @@ class GenerateSeriesUseCase:
         la corrida es reanudable bajo ese hilo.
         """
         proyecto = request.project
+        flujo = resolver_flujo(proyecto)
         self._audit.log_step(
             "solicitud",
             f"Generación solicitada para el proyecto '{proyecto.project_id}': "
@@ -108,6 +136,8 @@ class GenerateSeriesUseCase:
                 f"tema: {request.resolved_topic()}",
                 f"capítulos: {request.num_chapters}",
                 f"reintentos máx. de crítica: {request.max_critique_attempts}",
+                f"alcance (hasta): {flujo.hasta}",
+                f"flujo efectivo: {flujo.cadena()}",
                 f"audiencia: {proyecto.audience}",
                 f"contexto cultural: {proyecto.cultural_context}",
                 f"guía de estilo: {proyecto.style_guide}",

@@ -15,7 +15,7 @@ de leer el archivo; la aplicación, de decir qué significa un proyecto válido.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from sinnema.application.ports import (
@@ -25,6 +25,11 @@ from sinnema.application.ports import (
     ROLE_DIRECTOR,
     ROLE_PLANNER,
     ROLE_SCRIPTWRITER,
+)
+from sinnema.domain.constants import (
+    ALCANCE_COMPUERTA,
+    ALCANCE_DEFAULT,
+    ALCANCES,
 )
 from sinnema.domain.models import FormatProfile
 
@@ -120,6 +125,224 @@ class PipelineConfig:
 
 
 @dataclass(frozen=True)
+class FlowSpec:
+    """Flujo del pipeline declarado por el proyecto (sección opcional ``[flujo]``).
+
+    Composición por fases del capítulo (ver ``registry.TipoAgente``): qué roles
+    participan y en qué orden, más el ``hasta``: el último hito del pipeline
+    que la corrida alcanza (``ALCANCES``, default ``produccion``). Sin sección
+    ``[flujo]`` el proyecto no declara nada (``ProjectSpec.flujo is None``) y
+    ``resolver_flujo`` reconstruye la topología legacy: los seis roles, donde
+    ``activo = false`` conserva su cortocircuito.
+
+    Los roles estructurales (``planner``, ``scriptwriter``) nunca se listan:
+    siempre participan y sus nodos son del builder, no de estas fases.
+    """
+
+    contexto: Tuple[str, ...] = ()
+    transformaciones: Tuple[str, ...] = ()
+    #: Rol compuerta (tipo ``revisor``); ``None`` = aprobación directa.
+    revisor: Optional[str] = None
+    enriquecimiento: Tuple[str, ...] = ()
+    hasta: str = ALCANCE_DEFAULT
+    #: False en el flujo implícito legacy (reconstruido sin sección ``[flujo]``):
+    #: allí la participación la decide ``activo``, no la lista.
+    declarado: bool = True
+
+    def validar(self, agentes: Mapping[str, "AgentConfig"]) -> List[str]:
+        """Devuelve TODOS los problemas de composición y alcance del flujo."""
+        problemas: List[str] = []
+        # Import diferido: el registro importa este módulo (ciclo registry ->
+        # prompts -> projects); en tiempo de llamada ya está construido.
+        from sinnema.application.registry import AGENT_REGISTRY
+
+        fases = (
+            ("contexto", "contexto", self.contexto),
+            ("transformaciones", "transformador", self.transformaciones),
+            ("enriquecimiento", "enriquecedor", self.enriquecimiento),
+        )
+        listados: List[str] = []
+        for fase, tipo, roles in fases:
+            for rol in roles:
+                definicion = AGENT_REGISTRY.get(rol)
+                if definicion is None:
+                    problemas.append(
+                        f"rol desconocido '{rol}' en '{fase}' de [flujo] "
+                        f"(roles del registro: {', '.join(sorted(AGENT_REGISTRY))})."
+                    )
+                    continue
+                if rol in ROLES_ESENCIALES:
+                    problemas.append(
+                        f"el rol '{rol}' es estructural y no se lista en [flujo]: "
+                        "siempre participa del pipeline."
+                    )
+                    continue
+                if definicion.tipo != tipo:
+                    problemas.append(
+                        f"el rol '{rol}' es de tipo '{definicion.tipo}' y no puede "
+                        f"ir en la fase '{fase}' de [flujo]."
+                    )
+                if rol in listados:
+                    problemas.append(
+                        f"el rol '{rol}' está repetido en [flujo]: un rol aparece "
+                        "una sola vez en todo el flujo."
+                    )
+                listados.append(rol)
+        if self.revisor is not None:
+            definicion = AGENT_REGISTRY.get(self.revisor)
+            if definicion is None:
+                problemas.append(
+                    f"rol desconocido '{self.revisor}' en 'revisor' de [flujo] "
+                    f"(roles del registro: {', '.join(sorted(AGENT_REGISTRY))})."
+                )
+            elif self.revisor in ROLES_ESENCIALES:
+                problemas.append(
+                    f"el rol '{self.revisor}' es estructural y no se lista en "
+                    "[flujo]: siempre participa del pipeline."
+                )
+            elif definicion.tipo != "revisor":
+                problemas.append(
+                    f"el rol '{self.revisor}' es de tipo '{definicion.tipo}' y no "
+                    "puede hacer de 'revisor' en [flujo]."
+                )
+            elif self.revisor in listados:
+                problemas.append(
+                    f"el rol '{self.revisor}' está repetido en [flujo]: un rol "
+                    "aparece una sola vez en todo el flujo."
+                )
+            listados.append(self.revisor)
+
+        # Con [flujo] la lista es la fuente de verdad: apagar un rol listado
+        # es contradicción (error accionable); en los no listados se ignora.
+        for rol in listados:
+            config = agentes.get(rol)
+            if config is not None and not config.activo:
+                problemas.append(
+                    f"el rol '{rol}' tiene activo = false pero está listado en "
+                    "[flujo]: quítalo del flujo (con [flujo], la lista manda)."
+                )
+
+        problemas.extend(self.validar_alcance())
+        return problemas
+
+    def validar_alcance(self) -> List[str]:
+        """Coherencia del ``hasta`` con el vocabulario y con la compuerta."""
+        problemas: List[str] = []
+        if self.hasta not in ALCANCES:
+            problemas.append(
+                f"'hasta' en [flujo] debe ser uno de: {', '.join(ALCANCES)} "
+                f"(default: '{ALCANCE_DEFAULT}'; recibido: '{self.hasta}')."
+            )
+        elif (
+            ALCANCES.index(self.hasta) >= ALCANCES.index(ALCANCE_COMPUERTA)
+            and self.revisor is None
+        ):
+            problemas.append(
+                f"el hito '{self.hasta}' exige declarar un 'revisor' en [flujo]: "
+                "los capítulos descartados solo pueden surgir de la compuerta "
+                "de calidad."
+            )
+        return problemas
+
+    def truncado(self) -> "FlowSpec":
+        """El mismo flujo cortado en el hito ``hasta``: el flujo EFECTIVO.
+
+        Los roles declarados por encima del hito no corren (permitido: el flujo
+        puede declararse completo y compartirse entre shows). ``guion_final``
+        con cero transformaciones es válido (equivale a ``guion``).
+        """
+        if self.hasta not in ALCANCES:
+            return self  # hito inválido: ya se reporta en validar()
+        corte = ALCANCES.index(self.hasta)
+        return FlowSpec(
+            contexto=self.contexto if corte >= ALCANCES.index("guion") else (),
+            transformaciones=(
+                self.transformaciones if corte >= ALCANCES.index("guion_final") else ()
+            ),
+            revisor=self.revisor if corte >= ALCANCES.index("auditado") else None,
+            enriquecimiento=(
+                self.enriquecimiento if corte >= ALCANCES.index("produccion") else ()
+            ),
+            hasta=self.hasta,
+            declarado=self.declarado,
+        )
+
+    def roles_completos(self) -> Tuple[str, ...]:
+        """Todos los roles que el flujo efectivo pone a trabajar, en orden.
+
+        Incluye los estructurales (``planner``, ``scriptwriter``) salvo cuando
+        el hito ``plan`` corta antes de escribir guiones: allí solo el planner
+        necesita agente.
+        """
+        if self.hasta == "plan":
+            return (ROLE_PLANNER,)
+        roles = [ROLE_PLANNER, *self.contexto, ROLE_SCRIPTWRITER, *self.transformaciones]
+        if self.revisor is not None:
+            roles.append(self.revisor)
+        roles.extend(self.enriquecimiento)
+        return tuple(roles)
+
+    def cadena(self) -> str:
+        """Los pasos del flujo efectivo en orden, para auditoría y previews."""
+        if self.hasta == "plan":
+            return "plan_series (sin bucle de capítulos)"
+        pasos = [*self.contexto, ROLE_SCRIPTWRITER, *self.transformaciones]
+        if self.revisor is not None:
+            pasos.append(self.revisor)
+        pasos.extend(self.enriquecimiento)
+        pasos.append("commit_episode")
+        return " -> ".join(pasos)
+
+
+def resolver_flujo(project: "ProjectSpec") -> FlowSpec:
+    """Flujo efectivo de un proyecto: fases truncadas por el hito.
+
+    Sin sección ``[flujo]`` reconstruye la topología legacy (los seis roles en
+    el orden histórico): los nodos existen para todos y el cortocircuito por
+    ``activo = false`` queda dentro de cada nodo, igual que siempre.
+    """
+    if project.flujo is None:
+        return FlowSpec(
+            contexto=(ROLE_CONTINUITY,),
+            transformaciones=(ROLE_ADAPTER,),
+            revisor=ROLE_CRITIC,
+            enriquecimiento=(ROLE_DIRECTOR,),
+            hasta=ALCANCE_DEFAULT,
+            declarado=False,
+        )
+    return project.flujo.truncado()
+
+
+def con_hasta(project: "ProjectSpec", hasta: str) -> "ProjectSpec":
+    """Proyecto con el hito sobrescrito para una corrida (CLI ``--hasta``).
+
+    Precedencia: flag > proyecto > default. Un hito por debajo del declarado
+    trunca el flujo; por encima, exige que el flujo provea lo que el hito
+    necesita (p. ej. ``auditado`` sin revisor es un error accionable).
+    """
+    if hasta not in ALCANCES:
+        raise ValueError(
+            f"'hasta' debe ser uno de: {', '.join(ALCANCES)} "
+            f"(default: '{ALCANCE_DEFAULT}'; recibido: '{hasta}')."
+        )
+    declarado = project.flujo if project.flujo is not None else FlowSpec(
+        contexto=(ROLE_CONTINUITY,),
+        transformaciones=(ROLE_ADAPTER,),
+        revisor=ROLE_CRITIC,
+        enriquecimiento=(ROLE_DIRECTOR,),
+        declarado=False,
+    )
+    nuevo = replace(declarado, hasta=hasta)
+    problemas = nuevo.validar_alcance()
+    if problemas:
+        raise ValueError(
+            f"--hasta '{hasta}' incompatible con el flujo del proyecto: "
+            + " | ".join(problemas)
+        )
+    return replace(project, flujo=nuevo)
+
+
+@dataclass(frozen=True)
 class ProjectSpec:
     """Configuración completa de un show: todo lo que varía entre proyectos."""
 
@@ -137,6 +360,10 @@ class ProjectSpec:
     format: FormatProfile
     agentes: Mapping[str, AgentConfig] = field(default_factory=dict)
     pipeline: PipelineConfig = field(default_factory=PipelineConfig)
+    #: Flujo declarado por el proyecto (sección [flujo]); ``None`` = sin sección:
+    #: ``resolver_flujo`` aplica la semántica legacy (los 6 roles menos los
+    #: ``activo = false``, que conservan su cortocircuito).
+    flujo: Optional[FlowSpec] = None
 
     def config_de_agente(self, rol: str) -> AgentConfig:
         """Config del rol para este proyecto (vacía si no se declaró nada)."""
@@ -199,6 +426,9 @@ class ProjectSpec:
                     f"El rol '{rol}' no se puede desactivar: es estructural del "
                     "pipeline (sin él no hay serie)."
                 )
+
+        if self.flujo is not None:
+            problemas.extend(self.flujo.validar(self.agentes))
 
         if problemas:
             raise ValueError(
@@ -264,6 +494,9 @@ def _mapear_seccion(
 
 _CLAVES_AGENTE = frozenset({"activo", "reglas", "proveedor", "modelo", "temperatura"})
 _CLAVES_PIPELINE = frozenset({"intentos_maximos_de_critica", "politica_al_agotar"})
+_CLAVES_FLUJO = frozenset(
+    {"contexto", "transformaciones", "revisor", "enriquecimiento", "hasta"}
+)
 
 
 def _mapear_agentes(datos: Dict[str, Any], problemas: List[str]) -> Dict[str, AgentConfig]:
@@ -377,6 +610,67 @@ def _mapear_pipeline(datos: Dict[str, Any], problemas: List[str]) -> PipelineCon
         return PipelineConfig()
 
 
+def _mapear_flujo(datos: Dict[str, Any], problemas: List[str]) -> Optional[FlowSpec]:
+    """Parsea la sección opcional ``[flujo]`` (composición + alcance).
+
+    Devuelve ``None`` si la sección no existe (semántica legacy intacta). Los
+    problemas de SHAPE se acumulan aquí; los de semántica (roles desconocidos,
+    repetidos, ``activo = false``, coherencia del hito) los reporta
+    ``FlowSpec.validar`` en ``ProjectSpec.validate``: todos juntos.
+    """
+    crudo = datos.get("flujo")
+    if crudo is None:
+        return None
+    if not isinstance(crudo, dict):
+        problemas.append("la sección [flujo] debe ser una tabla TOML")
+        return None
+    for clave in crudo:
+        if clave not in _CLAVES_FLUJO:
+            problemas.append(
+                f"clave desconocida '{clave}' en [flujo] "
+                f"(válidas: {', '.join(sorted(_CLAVES_FLUJO))})."
+            )
+
+    def _fase_lista(nombre: str) -> Tuple[str, ...]:
+        valor = crudo.get(nombre)
+        if valor is None:
+            return ()
+        if not isinstance(valor, list) or not all(
+            isinstance(rol, str) for rol in valor
+        ):
+            problemas.append(
+                f"'{nombre}' en [flujo] debe ser una lista de roles (texto)."
+            )
+            return ()
+        return tuple(rol.strip() for rol in valor if rol.strip())
+
+    revisor = crudo.get("revisor")
+    if revisor is not None:
+        if not isinstance(revisor, str) or not revisor.strip():
+            problemas.append(
+                "'revisor' en [flujo] debe ser el rol (texto) del agente compuerta."
+            )
+            revisor = None
+        else:
+            revisor = revisor.strip()
+
+    hasta = crudo.get("hasta", ALCANCE_DEFAULT)
+    if not isinstance(hasta, str) or not hasta.strip():
+        problemas.append(
+            f"'hasta' en [flujo] debe ser texto: uno de {', '.join(ALCANCES)} "
+            f"(default: '{ALCANCE_DEFAULT}')."
+        )
+        hasta = ALCANCE_DEFAULT
+
+    return FlowSpec(
+        contexto=_fase_lista("contexto"),
+        transformaciones=_fase_lista("transformaciones"),
+        revisor=revisor,
+        enriquecimiento=_fase_lista("enriquecimiento"),
+        hasta=hasta.strip(),
+    )
+
+
 def project_from_dict(datos: Dict[str, Any]) -> ProjectSpec:
     """Construye y valida un ``ProjectSpec`` desde el dict parseado del TOML."""
     problemas: List[str] = []
@@ -400,6 +694,11 @@ def project_from_dict(datos: Dict[str, Any]) -> ProjectSpec:
 
     agentes = _mapear_agentes(datos, problemas)
     pipeline = _mapear_pipeline(datos, problemas)
+    flujo = _mapear_flujo(datos, problemas)
+    if flujo is not None:
+        # Semántica del flujo junto al resto de los problemas (§9: todos se
+        # reportan de una vez al cargar el proyecto).
+        problemas.extend(flujo.validar(agentes))
     if problemas:
         raise ValueError(
             "Archivo de proyecto mal formado: " + "; ".join(problemas) + "."
@@ -412,6 +711,7 @@ def project_from_dict(datos: Dict[str, Any]) -> ProjectSpec:
         format=perfil,
         agentes=agentes,
         pipeline=pipeline,
+        flujo=flujo,
     )
     spec.validate()
     return spec

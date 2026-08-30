@@ -38,3 +38,13 @@ LORE_TERM_MAX_WORDS = 4
 #: Rango universal del score de QA; el mínimo de aprobación lo fija el proyecto.
 QA_SCORE_UNIVERSAL_MIN = 0
 QA_SCORE_UNIVERSAL_MAX = 10
+
+# --- Alcance del pipeline (hitos, de menor a mayor) -----------------------------
+#: Último hito del pipeline que un proyecto alcanza (``[flujo].hasta`` y campo
+#: ``alcance`` del entregable). Vocabulario cerrado y ordenado: la comparación
+#: de orden (p. ej. "los fallos exigen compuerta") usa este índice.
+ALCANCES = ("plan", "guion", "guion_final", "auditado", "produccion")
+ALCANCE_DEFAULT = "produccion"
+#: Primer alcance cuya corrida pasa por la compuerta de calidad (revisor):
+#: solo a partir de ahí pueden existir capítulos descartados.
+ALCANCE_COMPUERTA = "auditado"
