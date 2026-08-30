@@ -199,7 +199,7 @@ que debe devolver. Sobre eso:
 
 ## 6. Proyectos: la unidad de reutilización
 
-Un proyecto (show) es un archivo TOML con cuatro secciones:
+Un proyecto (show) es un archivo TOML con seis secciones:
 
 | Sección | Contenido |
 |---|---|
@@ -207,6 +207,8 @@ Un proyecto (show) es un archivo TOML con cuatro secciones:
 | `[voz]` | audiencia, contexto cultural, tono, guía de estilo, restricciones |
 | `[visual]` | estilo visual maestro (en inglés, para los modelos de imagen) |
 | `[formato]` | sobre editorial numérico — **opcional**; sin él rige el perfil por defecto (vertical ~60 s) |
+| `[flujo]` | qué agentes participan, en qué orden y **hasta dónde llega** la corrida — **opcional**; sin él rige la topología por defecto |
+| `[agentes.<rol>]` | reglas, proveedor/modelo/temperatura, activación — y, para **agentes custom**, `tipo` + `contrato` + `entradas` + `instrucciones` |
 
 Puntos clave:
 
@@ -218,6 +220,57 @@ Puntos clave:
   entregables, auditoría y lore viven separados por proyecto.
 - El perfil editorial se valida por coherencia al cargar: los rangos duros
   deben envolver a los objetivos, y todo debe caber en los límites universales.
+
+### Flujo y alcance por proyecto (`[flujo]`)
+
+Sin la sección, todos los shows usan la topología por defecto. Con ella, cada
+show elige **qué agentes participan, en qué orden y hasta dónde llega**:
+
+```toml
+[flujo]
+contexto        = ["continuity", "fact_checker"]  # fase pre-escritura
+transformaciones = ["adapter"]                     # tras el escritor
+revisor          = "critic"                        # compuerta (opcional)
+enriquecimiento  = ["technical_director"]          # post-aprobación
+hasta            = "produccion"                    # alcance de la corrida
+```
+
+El `hasta` corta la cadena en un hito del vocabulario cerrado
+(`plan < guion < guion_final < auditado < produccion`): un show puede entregar
+solo el outline (`plan`), los borradores (`guion`), el guion final **sin specs
+de video** (`guion_final`), el guion con dictamen (`auditado`) o el paquete
+completo con los prompts finales (`produccion`, el default). El entregable
+reporta el alcance en su campo `alcance` (`schema_version 1.1`), y la CLI
+puede sobreescribirlo por corrida con `--hasta`. Con `[flujo]` declarado, la
+lista manda (los roles `activo = false` listados son un error); los agentes
+`escritor` (`scriptwriter`) y el planificador son estructurales y siempre
+participan.
+
+### Agentes custom: agentes nuevos sin tocar código
+
+Cualquier rol nuevo se define íntegramente en el TOML del proyecto —o desde la
+web— declarando su `tipo`, su `contrato` genérico de salida, las `entradas`
+(bloques del estado que recibe) y sus `instrucciones` (prompt base con
+placeholders como `{marca}`):
+
+```toml
+[agentes.fact_checker]
+tipo          = "contexto"          # contexto | enriquecedor | revisor
+contrato      = "notas"             # notas | texto | dictamen (solo revisor)
+entradas      = ["capitulo", "lore"]
+instrucciones = "Eres el verificador de datos de {marca}. ..."
+
+[flujo]
+contexto = ["continuity", "fact_checker"]   # se lista como cualquier rol
+```
+
+Los contratos genéricos (`notas`, `texto`) validan la salida como cualquier
+Pydantic; el `dictamen` de un revisor custom es directamente el
+`QualityAudit` de dominio (la compuerta depende de esa semántica). Los
+artefactos de contexto/enriquecimiento viajan como adjuntos del episodio.
+Límites: no hay agentes custom `escritor`/`transformador` (exigen contratos de
+guion tipados) ni validación cruzada entre agentes (eso es territorio de los
+agentes de código).
 
 ---
 

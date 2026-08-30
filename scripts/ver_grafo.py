@@ -31,6 +31,7 @@ except ImportError:  # pragma: no cover
     pass
 
 from sinnema.application.graph import build_pipeline_graph
+from sinnema.application.registry import AGENT_REGISTRY
 from sinnema.application.requests import (
     MAX_CRITIQUE_ATTEMPTS_LIMIT,
     SeriesRequest,
@@ -41,17 +42,15 @@ from sinnema.domain.constants import SERIES_MAX_CHAPTERS
 from sinnema.infrastructure.llm.gateway import build_gateway
 from sinnema.infrastructure.projects import list_projects, load_project
 
-#: Descripción legible de cada nodo, para el stream en vivo.
+#: Descripción legible de cada nodo, para el stream en vivo. Los nodos de
+#: agente salen del registro; los estructurales se describen aquí.
 ROL_NODO: Dict[str, str] = {
-    "plan_series": "Strategic Planner (plan maestro)",
-    "continuity_master": "Lore Keeper (directivas de continuidad)",
-    "scriptwriter": "Content Creator (borrador)",
-    "persona_adapter": "Audience Adapter (adaptación al público)",
-    "chief_critic": "Auditor (dictamen de calidad)",
-    "technical_director": "Visual/Audio Director (paquete técnico)",
+    d.nodo: d.descripcion for d in AGENT_REGISTRY.values()
+}
+ROL_NODO.update({
     "commit_episode": "Consolidación del episodio + lore",
     "fail_chapter": "Capítulo descartado (reintentos agotados)",
-}
+})
 
 
 def _int_en_rango(minimo: int, maximo: int, mensaje: str):

@@ -1,39 +1,48 @@
 """Orquestación del pipeline multi-agente como grafo LangGraph cíclico.
 
-Topología del grafo (cíclica):
+Topología del grafo se resuelve desde el flujo efectivo del proyecto
+(``resolver_flujo``): composición de fases + corte por el hito ``hasta``:
 
     START
-      -> plan_series            (Strategic Planner)
-      -> continuity_master      (Lore Keeper)
-      -> scriptwriter           (Content Creator)
-      -> persona_adapter        (Audience Adapter)
-      -> chief_critic           (Auditor)
-           |-- revise ----------> scriptwriter   (ciclo de crítica con feedback)
-           |-- force_accept ----> technical_director
-           |-- skip_chapter ----> fail_chapter   (política de reintentos agotados)
-      -> technical_director     (Visual/Audio Director)
-      -> commit_episode         (consolida episodio + actualiza lore)
-           |-- next_chapter ----> continuity_master
+      -> plan_series                        (Strategic Planner, nivel de serie)
+      -> [contexto]*                        (Lore Keeper, ...)
+      -> scriptwriter                       (Content Creator, escritor)
+      -> [transformaciones]*                (Audience Adapter, ...)
+      -> (chief_critic                      (Auditor, compuerta opcional)
+            |-- revise ----> scriptwriter   (ciclo de crítica con feedback)
+            |-- approve ---> enriquecedores | commit
+            |-- skip_chapter -> fail_chapter (reintentos agotados))?
+      -> [enriquecedores]*                  (Visual/Audio Director, ...)
+      -> commit_episode                     (consolida episodio + actualiza lore)
+           |-- next_chapter ---> primer nodo del capítulo
            |-- series_complete -> END
 
+Con ``hasta = "plan"`` no hay bucle de capítulos: ``START -> plan_series ->
+consolidar_plan -> END`` (el entregable es el outline sin episodios).
+
 El grafo se compila POR PROYECTO: los nodos cierran sobre el ``ProjectSpec``
-(prompts del rol + sobre editorial ``FormatProfile``). Cada nodo es una función
-pura sobre el estado: pide al puerto ``StructuredGenerationPort`` la generación
-estructurada de su rol, valida el resultado contra el perfil del proyecto y
-contra las reglas cruzadas de dominio, y devuelve solo las claves que modifica.
+(prompts del rol + sobre editorial ``FormatProfile``).
+
+Los nodos de agente NO se escriben a mano: ``make_agent_node`` los genera a
+partir de su ``AgentDefinition`` (``sinnema.application.registry``), que
+declara mensajes, validadores de dominio, cortocircuitos y actualizaciones de
+estado. Quedan escritos a mano solo los nodos ESTRUCTURALES —``plan_series``,
+la compuerta de revisión (``chief_critic`` y sus aristas condicionales),
+``commit_episode``, ``fail_chapter`` y ``consolidar_plan``— porque encapsulan
+semántica del pipeline (iterador de capítulos, política de agotamiento,
+ensamblado del entregable), no la de un agente en particular.
 """
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
+from pydantic import BaseModel
 
 from sinnema.application.ports import (
-    ROLE_ADAPTER,
-    ROLE_CONTINUITY,
     ROLE_CRITIC,
     ROLE_DIRECTOR,
     ROLE_PLANNER,
@@ -42,52 +51,135 @@ from sinnema.application.ports import (
     NullAuditTrail,
     StructuredGenerationPort,
 )
-from sinnema.application.projects import ProjectSpec
-from sinnema.application.prompts import (
-    adapter as adapter_prompts,
-    continuity as continuity_prompts,
-    critic as critic_prompts,
-    director as director_prompts,
-    planner as planner_prompts,
-    scriptwriter as scriptwriter_prompts,
+from sinnema.application.projects import ProjectSpec, resolver_flujo
+from sinnema.application.registry import (
+    AGENT_REGISTRY,
+    AgentDefinition,
+    build_role_system_prompts,
+    capitulo_actual,
+    definiciones_del_proyecto,
 )
-from sinnema.application.prompts import build_role_system_prompts
 from sinnema.application.settings import PipelineSettings
 from sinnema.application.state import PipelineState
-from sinnema.domain.models import (
-    AdaptedScript,
-    ChapterOutline,
-    ContinuityDirectives,
-    QualityAudit,
-    ScriptDraft,
-    SeriesPlan,
-    TechnicalPackage,
-)
+from sinnema.domain.models import ArtefactoAdjunto
 from sinnema.domain.services import (
     assemble_episode,
     build_failed_record,
     extract_new_lore,
     identity_adaptation,
-    validate_adaptation_format,
-    validate_adaptation_matches_draft,
-    validate_audit_verdict,
-    validate_draft_format,
-    validate_package_format,
-    validate_package_matches_draft,
-    validate_plan_format,
-    validate_plan_size,
 )
-from sinnema.domain.text import count_words
 
 logger = logging.getLogger("sinnema.graph")
 
 
-def _current_chapter(state: PipelineState) -> Tuple[SeriesPlan, ChapterOutline, int]:
-    plan = state["series_plan"]
-    indice = state.get("current_chapter_index", 0)
-    if plan is None:
-        raise RuntimeError("El plan de serie no está disponible en el estado.")
-    return plan, plan.chapters[indice], indice
+def make_agent_node(
+    definicion: AgentDefinition,
+    gateway: StructuredGenerationPort,
+    project: ProjectSpec,
+    system_prompts: Dict[str, str],
+    audit: AuditTrailPort,
+):
+    """Genera el nodo del grafo para un agente a partir de su definición.
+
+    El nodo resultante: (1) se cortocircuita con el fallback determinista de
+    la definición si el proyecto desactivó el rol; (2) pide al puerto de
+    generación la salida estructurada del rol; (3) aplica los validadores de
+    dominio declarados ANTES de que el artefacto circule por el estado; y
+    (4) escribe su slot de ``produce`` junto con las claves extra declaradas.
+    """
+
+    def _nodo_agente(state: PipelineState) -> Dict[str, Any]:
+        if definicion.al_desactivar is not None and not project.agente_activo(
+            definicion.rol
+        ):
+            logger.info(
+                "Agente '%s' desactivado en el proyecto: nodo cortocircuitado.",
+                definicion.rol,
+            )
+            if definicion.resumen_desactivado is not None:
+                resumen = definicion.resumen_desactivado(state)
+            else:
+                resumen = (
+                    f"Agente desactivado en el proyecto: {definicion.rol} "
+                    "no genera su artefacto."
+                )
+            audit.log_step(definicion.nodo, resumen)
+            return definicion.al_desactivar(state)
+
+        mensaje = definicion.mensaje(project, state)
+        artefacto = gateway.generate(
+            definicion.rol,
+            definicion.esquema,
+            system_prompts[definicion.rol],
+            mensaje,
+        )
+        for validar in definicion.validadores:
+            validar(artefacto, project, state)
+
+        if definicion.resumen is not None:
+            resumen = definicion.resumen(artefacto, state)
+        else:
+            resumen = (
+                f"{definicion.rol} generó {definicion.esquema.__name__}."
+            )
+        logger.info("Nodo '%s' completado: %s", definicion.nodo, resumen)
+        audit.log_step(definicion.nodo, resumen, artifact=artefacto)
+
+        # Un agente custom adjunta a la pizarra ({"rol": artefacto}) para que
+        # el reducer la fusione por clave y el commit lo adjunte al episodio.
+        valor: Any = (
+            {definicion.rol: artefacto} if definicion.adjunto else artefacto
+        )
+        actualizacion: Dict[str, Any] = {definicion.produce: valor}
+        if definicion.actualizacion_extra is not None:
+            actualizacion.update(definicion.actualizacion_extra(artefacto, state))
+        return actualizacion
+
+    return _nodo_agente
+
+
+def _serializar_adjunto(artefacto: Any) -> Dict[str, Any]:
+    """Artefacto del estado en JSON ( BaseModel -> dict; dict -> tal cual)."""
+    if isinstance(artefacto, BaseModel):
+        return artefacto.model_dump(mode="json")
+    if isinstance(artefacto, dict):
+        return artefacto
+    raise TypeError(
+        f"La pizarra solo guarda contratos validados (BaseModel) o JSON "
+        f"dict; recibido: {type(artefacto).__name__}."
+    )
+
+
+def _adjuntos_del_estado(
+    state: PipelineState,
+    *,
+    paquete: Optional[Any],
+    dictamen: Optional[Any],
+) -> list:
+    """Adjuntos del episodio: specs, dictamen y artefactos de la pizarra.
+
+    ``technical`` y ``audit`` se mantienen como campos propios por
+    compatibilidad y además figuran en ``adjuntos`` cuando existen; los
+    artefactos de los enriquecedores sin slot canónico viajan solo aquí.
+    """
+    adjuntos = []
+    if paquete is not None:
+        adjuntos.append(
+            ArtefactoAdjunto(
+                rol=ROLE_DIRECTOR, artefacto=_serializar_adjunto(paquete)
+            )
+        )
+    if dictamen is not None:
+        adjuntos.append(
+            ArtefactoAdjunto(
+                rol=ROLE_CRITIC, artefacto=_serializar_adjunto(dictamen)
+            )
+        )
+    for clave, artefacto in sorted((state.get("artefactos") or {}).items()):
+        adjuntos.append(
+            ArtefactoAdjunto(rol=clave, artefacto=_serializar_adjunto(artefacto))
+        )
+    return adjuntos
 
 
 def build_pipeline_graph(
@@ -104,223 +196,122 @@ def build_pipeline_graph(
     """
     settings = settings or PipelineSettings()
     audit = audit or NullAuditTrail()
-    perfil = project.format
     system_prompts = build_role_system_prompts(project)
+    # Catálogo completo del proyecto: registro global + agentes custom del
+    # TOML. El flujo solo referencia roles presentes aquí.
+    definiciones = definiciones_del_proyecto(project)
 
-    # ----------------------------- NODOS -----------------------------
+    # ---------------------- NODOS ESTRUCTURALES ----------------------
 
     def _plan_series(state: PipelineState) -> Dict[str, Any]:
-        """Strategic Planner: genera el plan macro de la serie."""
-        solicitados = state.get("num_chapters", 3)
-        mensaje = planner_prompts.build_user_message(
-            project, state["topic"], solicitados,
+        """Strategic Planner: genera el plan macro de la serie.
+
+        Nodo de nivel de serie (único agente fuera del bucle de capítulo);
+        usa la definición del registro para mensaje, esquema y validadores.
+        """
+        planador = AGENT_REGISTRY[ROLE_PLANNER]
+        plan = gateway.generate(
+            planador.rol,
+            planador.esquema,
+            system_prompts[planador.rol],
+            planador.mensaje(project, state),
         )
-        plan: SeriesPlan = gateway.generate(
-            ROLE_PLANNER, SeriesPlan, system_prompts[ROLE_PLANNER], mensaje
-        )
-        validate_plan_size(plan, solicitados)
-        validate_plan_format(plan, perfil)
+        for validar in planador.validadores:
+            validar(plan, project, state)
         logger.info(
             "Plan maestro listo: '%s' con %d capítulo(s).",
             plan.series_title, len(plan.chapters),
         )
         audit.log_step(
-            "plan_series",
-            f"Plan maestro '{plan.series_title}' con {len(plan.chapters)} capítulo(s).",
+            planador.nodo,
+            planador.resumen(plan, state) if planador.resumen else "Plan de serie.",
             artifact=plan,
             details=[f"{c.chapter_id}: {c.title}" for c in plan.chapters],
         )
-        return {"series_plan": plan, "current_chapter_index": 0, "critique_attempts": 0}
-
-    def _continuity_master(state: PipelineState) -> Dict[str, Any]:
-        """Lore Keeper: emite directivas de continuidad para el capítulo actual."""
-        plan, capitulo, indice = _current_chapter(state)
-        if not project.agente_activo(ROLE_CONTINUITY):
-            logger.info("Continuidad desactivada: %s sigue sin directivas.", capitulo.chapter_id)
-            audit.log_step(
-                "continuity_master",
-                f"Agente desactivado en el proyecto: {capitulo.chapter_id} "
-                "avanza sin directivas de continuidad.",
-            )
-            return {"continuity_directives": None}
-        previo = plan.chapters[indice - 1] if indice > 0 else None
-        mensaje = continuity_prompts.build_user_message(
-            chapter=capitulo,
-            previous_chapter=previo,
-            lore_entries=state.get("lore_entries", []),
-            recurring_elements=plan.recurring_elements,
-        )
-        directivas: ContinuityDirectives = gateway.generate(
-            ROLE_CONTINUITY, ContinuityDirectives,
-            system_prompts[ROLE_CONTINUITY], mensaje,
-        )
-        logger.info("Directivas de continuidad listas para %s.", capitulo.chapter_id)
-        audit.log_step(
-            "continuity_master",
-            f"Directivas de continuidad para {capitulo.chapter_id} "
-            f"({len(directivas.new_terms_to_introduce)} término(s) nuevos).",
-            artifact=directivas,
-        )
-        return {"continuity_directives": directivas}
-
-    def _scriptwriter(state: PipelineState) -> Dict[str, Any]:
-        """Content Creator: escribe el borrador del capítulo (con feedback si es retry)."""
-        _, capitulo, _ = _current_chapter(state)
-        mensaje = scriptwriter_prompts.build_user_message(
-            project,
-            chapter=capitulo,
-            directives=state["continuity_directives"],
-            feedback=state.get("pending_feedback"),
-        )
-        borrador: ScriptDraft = gateway.generate(
-            ROLE_SCRIPTWRITER, ScriptDraft,
-            system_prompts[ROLE_SCRIPTWRITER], mensaje,
-        )
-        validate_draft_format(borrador, perfil)
-        logger.info(
-            "Borrador %s: %d palabras / %.1f s (intento de crítica #%s).",
-            borrador.chapter_id, borrador.word_count, borrador.total_duration_seconds,
-            state.get("critique_attempts", 0) + 1,
-        )
-        audit.log_step(
-            "scriptwriter",
-            f"Borrador de {borrador.chapter_id}: {borrador.word_count} palabras, "
-            f"{borrador.total_duration_seconds:.1f} s "
-            f"(intento de crítica #{state.get('critique_attempts', 0) + 1}).",
-            artifact=borrador,
-        )
-        return {"draft_script": borrador, "pending_feedback": None, "qa_verdict": None}
-
-    def _persona_adapter(state: PipelineState) -> Dict[str, Any]:
-        """Audience Adapter: re-escribe al registro y cultura del público objetivo."""
-        _, capitulo, _ = _current_chapter(state)
-        borrador: ScriptDraft = state["draft_script"]
-        if not project.agente_activo(ROLE_ADAPTER):
-            adaptado = identity_adaptation(borrador)
-            logger.info("Adapter desactivado: %s pasa con adaptación identidad.", capitulo.chapter_id)
-            audit.log_step(
-                "persona_adapter",
-                f"Agente desactivado en el proyecto: el guion de "
-                f"{capitulo.chapter_id} pasa tal cual (adaptación identidad).",
-            )
-            return {"adapted_script": adaptado}
-        mensaje = adapter_prompts.build_user_message(
-            project,
-            draft=borrador,
-            directives=state["continuity_directives"],
-        )
-        adaptado: AdaptedScript = gateway.generate(
-            ROLE_ADAPTER, AdaptedScript, system_prompts[ROLE_ADAPTER], mensaje
-        )
-        validate_adaptation_matches_draft(borrador, adaptado)
-        validate_adaptation_format(adaptado, perfil)
-        logger.info("Guión %s adaptado al público objetivo.", capitulo.chapter_id)
-        audit.log_step(
-            "persona_adapter",
-            f"Guión de {capitulo.chapter_id} adaptado al público objetivo "
-            f"({len(adaptado.adapted_scenes)} escenas conservadas).",
-            artifact=adaptado,
-        )
-        return {"adapted_script": adaptado}
+        return {"series_plan": plan, **(planador.actualizacion_extra(plan, state) or {})}
 
     def _chief_critic(state: PipelineState) -> Dict[str, Any]:
-        """Auditor: dictamen booleano + feedback accionable; incrementa reintentos."""
-        _, capitulo, _ = _current_chapter(state)
-        if not project.agente_activo(ROLE_CRITIC):
+        """Compuerta de revisión: dictamen + incremento de reintentos.
+
+        Nodo estructural: su salida alimenta el router (revise / approve /
+        skip_chapter). Usa la definición del revisor del flujo (el crítico de
+        código o un revisor custom, cuyo contrato ``dictamen`` es igualmente
+        ``QualityAudit``). Sin revisor activo, aprueba sin dictamen.
+        """
+        _, capitulo, _ = capitulo_actual(state)
+        auditor = definiciones[flujo.revisor] if flujo.revisor is not None else (
+            AGENT_REGISTRY[ROLE_CRITIC]
+        )
+        if not project.agente_activo(auditor.rol):
             logger.info("Crítico desactivado: %s se aprueba sin auditoría.", capitulo.chapter_id)
             audit.log_step(
-                "chief_critic",
+                auditor.nodo,
                 f"Agente desactivado en el proyecto: {capitulo.chapter_id} "
                 "se aprueba sin dictamen de calidad.",
             )
             return {"qa_verdict": None, "critique_attempts": 0, "pending_feedback": None}
-        adaptado: AdaptedScript = state["adapted_script"]
-        borrador: ScriptDraft = state["draft_script"]
-        texto = " ".join(
-            [adaptado.adapted_hook]
-            + [s.narration for s in adaptado.adapted_scenes]
-            + [adaptado.adapted_cta]
+        # Un flujo puede auditar sin transformaciones aguas arriba: el guion
+        # auditado es entonces el borrador con adaptación identidad (determinista).
+        estado_auditoria = state
+        if state.get("adapted_script") is None and state.get("draft_script") is not None:
+            estado_auditoria = {
+                **state,
+                "adapted_script": identity_adaptation(state["draft_script"]),
+            }
+        dictamen = gateway.generate(
+            auditor.rol,
+            auditor.esquema,
+            system_prompts[auditor.rol],
+            auditor.mensaje(project, estado_auditoria),
         )
-        mensaje = critic_prompts.build_user_message(
-            project,
-            chapter=capitulo,
-            draft=borrador,
-            adapted=adaptado,
-            directives=state["continuity_directives"],
-            actual_word_count=count_words(texto),
+        for validar in auditor.validadores:
+            validar(dictamen, project, estado_auditoria)
+        extras = (
+            auditor.actualizacion_extra(dictamen, state)
+            if auditor.actualizacion_extra is not None else {}
         )
-        dictamen: QualityAudit = gateway.generate(
-            ROLE_CRITIC, QualityAudit, system_prompts[ROLE_CRITIC], mensaje
+        actualizacion: Dict[str, Any] = {"qa_verdict": dictamen, **(extras or {})}
+        intento = state.get("critique_attempts", 0) + 1
+        # El resumen reporta el intento YA incrementado: se evalúa sobre el
+        # estado fusionado con la actualización que devuelve este nodo.
+        resumen = (
+            auditor.resumen(dictamen, {**estado_auditoria, **actualizacion, "critique_attempts": intento})
+            if auditor.resumen else "Dictamen de calidad."
         )
-        validate_audit_verdict(dictamen, perfil)
-        intentos = state.get("critique_attempts", 0) + 1
-        actualizacion: Dict[str, Any] = {"qa_verdict": dictamen, "critique_attempts": intentos}
-        veredicto_texto = "APRUEBA" if dictamen.approved else "RECHAZA"
-        audit.log_step(
-            "chief_critic",
-            f"QA {veredicto_texto} {capitulo.chapter_id} "
-            f"(score {dictamen.overall_score}/10, intento {intentos}).",
-            artifact=dictamen,
-        )
+        audit.log_step(auditor.nodo, resumen, artifact=dictamen)
         if dictamen.approved:
-            actualizacion["pending_feedback"] = None
             logger.info(
                 "QA APRUEBA %s (score %d/10, intento %d).",
-                capitulo.chapter_id, dictamen.overall_score, intentos,
+                capitulo.chapter_id, dictamen.overall_score, intento,
             )
         else:
-            actualizacion["pending_feedback"] = dictamen.correction_feedback
             logger.info(
                 "QA RECHAZA %s (score %d/10, intento %d): %s",
-                capitulo.chapter_id, dictamen.overall_score, intentos,
+                capitulo.chapter_id, dictamen.overall_score, intento,
                 dictamen.correction_feedback[:120],
             )
         return actualizacion
 
-    def _technical_director(state: PipelineState) -> Dict[str, Any]:
-        """Visual/Audio Director: traduce el guion aprobado a specs técnicas."""
-        plan, capitulo, _ = _current_chapter(state)
-        borrador: ScriptDraft = state["draft_script"]
-        if not project.agente_activo(ROLE_DIRECTOR):
-            logger.info("Director técnico desactivado: %s sin specs visuales.", capitulo.chapter_id)
-            audit.log_step(
-                "technical_director",
-                f"Agente desactivado en el proyecto: {capitulo.chapter_id} "
-                "avanza sin paquete técnico.",
-            )
-            return {"technical_package": None}
-        mensaje = director_prompts.build_user_message(
-            project,
-            chapter=capitulo,
-            draft=borrador,
-            adapted=state["adapted_script"],
-            recurring_elements=plan.recurring_elements,
-        )
-        paquete: TechnicalPackage = gateway.generate(
-            ROLE_DIRECTOR, TechnicalPackage,
-            system_prompts[ROLE_DIRECTOR], mensaje,
-        )
-        validate_package_matches_draft(borrador, paquete)
-        validate_package_format(paquete, perfil)
-        logger.info("Paquete técnico listo para %s.", capitulo.chapter_id)
-        audit.log_step(
-            "technical_director",
-            f"Paquete técnico de {capitulo.chapter_id}: "
-            f"{len(paquete.visual_specs)} spec(s) visuales.",
-            artifact=paquete,
-        )
-        return {"technical_package": paquete}
-
     def _commit_episode(state: PipelineState) -> Dict[str, Any]:
-        """Consolida el episodio aprobado, actualiza lore y avanza el índice."""
-        _, capitulo, indice = _current_chapter(state)
+        """Consolida el episodio aprobado, actualiza lore y avanza el índice.
+
+        El guion final es el vigente al momento del commit: si el flujo cortó
+        antes de las transformaciones, ``assemble_episode`` aplica la
+        adaptación identidad sobre el borrador. Los adjuntos del episodio
+        reúnen los artefactos de los enriquecedores (slots canónicos +
+        pizarra) serializados en JSON.
+        """
+        _, capitulo, indice = capitulo_actual(state)
+        paquete = state.get("technical_package")
+        dictamen = state.get("qa_verdict")
         episodio = assemble_episode(
             chapter=capitulo,
             order_index=indice + 1,
             draft=state["draft_script"],
-            adapted=state["adapted_script"],
-            package=state["technical_package"],
-            audit=state["qa_verdict"],
+            adapted=state.get("adapted_script"),
+            package=paquete,
+            audit=dictamen,
+            adjuntos=_adjuntos_del_estado(state, paquete=paquete, dictamen=dictamen),
         )
         lore_nuevo = extract_new_lore(
             capitulo, state.get("continuity_directives"), state.get("lore_entries", [])
@@ -349,11 +340,14 @@ def build_pipeline_graph(
             "qa_verdict": None,
             "technical_package": None,
             "continuity_directives": None,
+            # None borra las claves de la pizarra (reducer fusionar_por_clave):
+            # los adjuntos ya viajan dentro del episodio consolidado.
+            "artefactos": {clave: None for clave in (state.get("artefactos") or {})},
         }
 
     def _fail_chapter(state: PipelineState) -> Dict[str, Any]:
         """Política 'skip_chapter': descarta el capítulo y registra el fallo."""
-        _, capitulo, indice = _current_chapter(state)
+        _, capitulo, indice = capitulo_actual(state)
         registro = build_failed_record(
             chapter=capitulo,
             max_attempts=settings.max_critique_attempts,
@@ -384,6 +378,25 @@ def build_pipeline_graph(
             "continuity_directives": None,
         }
 
+    def _consolidar_plan(state: PipelineState) -> Dict[str, Any]:
+        """Cierre de la corrida con ``hasta = 'plan'``: outline sin episodios.
+
+        Nodo estructural: no hay bucle de capítulos ni lore; el consolidador
+        del caso de uso arma el entregable con el plan y cero episodios.
+        """
+        plan = state["series_plan"]
+        logger.info(
+            "Alcance 'plan': outline de %d capítulo(s) sin episodios.",
+            len(plan.chapters),
+        )
+        audit.log_step(
+            "consolidar_plan",
+            f"Alcance 'plan': serie planificada con {len(plan.chapters)} "
+            "capítulo(s); la corrida termina sin guiones ni episodios.",
+            details=[f"{c.chapter_id}: {c.title}" for c in plan.chapters],
+        )
+        return {}
+
     # ------------------------ ARISTAS CONDICIONALES ------------------------
 
     def _route_after_critic(state: PipelineState) -> str:
@@ -406,42 +419,105 @@ def build_pipeline_graph(
 
     # ----------------------------- GRAFO -----------------------------
 
+    flujo = resolver_flujo(project)
+
+    def _agregar_agente(rol: str) -> str:
+        """Registra el nodo del rol (nombre estable) y devuelve su nombre."""
+        definicion = definiciones[rol]
+        workflow.add_node(
+            definicion.nodo,
+            make_agent_node(definicion, gateway, project, system_prompts, audit),
+        )
+        return definicion.nodo
+
     workflow = StateGraph(PipelineState)
     workflow.add_node("plan_series", _plan_series)
-    workflow.add_node("continuity_master", _continuity_master)
-    workflow.add_node("scriptwriter", _scriptwriter)
-    workflow.add_node("persona_adapter", _persona_adapter)
-    workflow.add_node("chief_critic", _chief_critic)
-    workflow.add_node("technical_director", _technical_director)
-    workflow.add_node("commit_episode", _commit_episode)
-    workflow.add_node("fail_chapter", _fail_chapter)
 
+    if flujo.hasta == "plan":
+        # Sin bucle de capítulos: planificar la serie y consolidar el outline.
+        workflow.add_edge(START, "plan_series")
+        workflow.add_node("consolidar_plan", _consolidar_plan)
+        workflow.add_edge("plan_series", "consolidar_plan")
+        workflow.add_edge("consolidar_plan", END)
+        return workflow.compile(checkpointer=checkpointer)
+
+    # Cableado por fases: el cursor avanza por el último nodo lineal y la
+    # entrada del capítulo marca el regreso de next_chapter. El orden de
+    # add_node/add_edge replica la declaración histórica: estable para el
+    # diagrama (ver_grafo) y para la serialización del checkpointer.
     workflow.add_edge(START, "plan_series")
-    workflow.add_edge("plan_series", "continuity_master")
-    workflow.add_edge("continuity_master", "scriptwriter")
-    workflow.add_edge("scriptwriter", "persona_adapter")
-    workflow.add_edge("persona_adapter", "chief_critic")
+    cursor = "plan_series"
+    entrada_capitulo: Optional[str] = None
+    for rol in flujo.contexto:
+        nodo = _agregar_agente(rol)
+        workflow.add_edge(cursor, nodo)
+        cursor = nodo
+        if entrada_capitulo is None:
+            entrada_capitulo = nodo
 
-    workflow.add_conditional_edges(
-        "chief_critic",
-        _route_after_critic,
-        {
-            "revise": "scriptwriter",
-            "approve": "technical_director",
-            "skip_chapter": "fail_chapter",
-        },
-    )
+    nodo_escritor = _agregar_agente(ROLE_SCRIPTWRITER)
+    workflow.add_edge(cursor, nodo_escritor)
+    cursor = nodo_escritor
+    if entrada_capitulo is None:
+        entrada_capitulo = nodo_escritor
 
-    workflow.add_edge("technical_director", "commit_episode")
-    workflow.add_conditional_edges(
-        "fail_chapter",
-        _route_after_commit,
-        {"next_chapter": "continuity_master", "series_complete": END},
-    )
+    for rol in flujo.transformaciones:
+        nodo = _agregar_agente(rol)
+        workflow.add_edge(cursor, nodo)
+        cursor = nodo
+
+    ultimo_enriquecedor: Optional[str] = None
+    if flujo.revisor is not None:
+        # El nodo de la compuerta lleva el nombre de su definición
+        # ("chief_critic" para el crítico de código; el rol para un revisor
+        # custom): estable para el checkpointer.
+        nodo_compuerta = definiciones[flujo.revisor].nodo
+        workflow.add_node(nodo_compuerta, _chief_critic)
+        workflow.add_edge(cursor, nodo_compuerta)
+        primero: Optional[str] = None
+        anterior: Optional[str] = None
+        for rol in flujo.enriquecimiento:
+            nodo = _agregar_agente(rol)
+            if primero is None:
+                primero = nodo
+            else:
+                workflow.add_edge(anterior, nodo)
+            anterior = nodo
+        workflow.add_conditional_edges(
+            nodo_compuerta,
+            _route_after_critic,
+            {
+                "revise": nodo_escritor,
+                "approve": primero or "commit_episode",
+                "skip_chapter": "fail_chapter",
+            },
+        )
+        ultimo_enriquecedor = anterior
+        if anterior is not None:
+            cursor = anterior
+        else:
+            cursor = None  # commit recibe el approve de la compuerta
+    else:
+        for rol in flujo.enriquecimiento:
+            nodo = _agregar_agente(rol)
+            workflow.add_edge(cursor, nodo)
+            cursor = nodo
+
+    workflow.add_node("commit_episode", _commit_episode)
+    if cursor is not None:
+        workflow.add_edge(cursor, "commit_episode")
+
+    if flujo.revisor is not None:
+        workflow.add_node("fail_chapter", _fail_chapter)
+        workflow.add_conditional_edges(
+            "fail_chapter",
+            _route_after_commit,
+            {"next_chapter": entrada_capitulo, "series_complete": END},
+        )
     workflow.add_conditional_edges(
         "commit_episode",
         _route_after_commit,
-        {"next_chapter": "continuity_master", "series_complete": END},
+        {"next_chapter": entrada_capitulo, "series_complete": END},
     )
 
     return workflow.compile(checkpointer=checkpointer)

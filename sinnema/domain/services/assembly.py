@@ -6,13 +6,14 @@ numeración de escenas compartida entre agentes distintos).
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Sequence
 
 from sinnema.domain.exceptions import DomainValidationError
 from sinnema.domain.models import (
     AdaptedScene,
     AdaptedScript,
     ApprovedEpisode,
+    ArtefactoAdjunto,
     ChapterOutline,
     FailedChapterRecord,
     FinalScene,
@@ -99,17 +100,23 @@ def assemble_episode(
     chapter: ChapterOutline,
     order_index: int,
     draft: ScriptDraft,
-    adapted: AdaptedScript,
+    adapted: Optional[AdaptedScript],
     package: Optional[TechnicalPackage],
     audit: Optional[QualityAudit],
+    adjuntos: Sequence[ArtefactoAdjunto] = (),
 ) -> ApprovedEpisode:
     """Consolida borrador + adaptación + specs técnicas en un episodio aprobado.
 
-    ``package`` y ``audit`` pueden ser ``None`` (proyecto con el director
-    técnico o el crítico desactivados): el episodio se ensambla igual, sin
-    specs visuales o sin dictamen de calidad.
+    ``adapted``, ``package`` y ``audit`` pueden ser ``None``: sin adaptación se
+    aplica la identidad (el flujo cortó antes del primer transformador y el
+    borrador ya está escrito para la audiencia); sin paquete técnico el
+    episodio no lleva specs visuales; sin auditoría, sin dictamen de calidad.
+    ``adjuntos`` son los artefactos integrables (enriquecedores, dictamen,
+    specs) que viajan con el episodio serializados en JSON.
     """
     _mismo_chapter_id(chapter.chapter_id, "borrador", draft.chapter_id)
+    if adapted is None:
+        adapted = identity_adaptation(draft)
     validate_adaptation_matches_draft(draft, adapted)
     if package is not None:
         validate_package_matches_draft(draft, package)
@@ -150,6 +157,7 @@ def assemble_episode(
         call_to_action=adapted.adapted_cta,
         technical=package,
         audit=audit,
+        adjuntos=list(adjuntos),
         forced_acceptance=audit is not None and not audit.approved,
     )
 

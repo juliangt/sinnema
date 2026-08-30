@@ -15,7 +15,7 @@ de leer el archivo; la aplicación, de decir qué significa un proyecto válido.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from sinnema.application.ports import (
@@ -25,6 +25,11 @@ from sinnema.application.ports import (
     ROLE_DIRECTOR,
     ROLE_PLANNER,
     ROLE_SCRIPTWRITER,
+)
+from sinnema.domain.constants import (
+    ALCANCE_COMPUERTA,
+    ALCANCE_DEFAULT,
+    ALCANCES,
 )
 from sinnema.domain.models import FormatProfile
 
@@ -58,6 +63,103 @@ POLITICAS_DE_AGOTAMIENTO = {
 TEMPERATURA_MIN = 0.0
 TEMPERATURA_MAX = 2.0
 
+# --- Agentes custom (declarados 100% en el TOML; spec-agentes-dinamicos §8) ----
+#: Tipos permitidos para un agente custom: la compuerta (revisor) y las fases
+#: periféricas. ``escritor``/``transformador`` exigen contratos de guion
+#: tipados y se quedan en código.
+TIPOS_CUSTOM = ("contexto", "enriquecedor", "revisor")
+#: Contratos genéricos de salida; el revisor EXIGE el dictamen de dominio
+#: (``QualityAudit``): la compuerta depende de esa semántica.
+CONTRATO_REVISOR = "dictamen"
+CONTRATOS_POR_TIPO = {
+    "contexto": ("notas", "texto"),
+    "enriquecedor": ("notas", "texto"),
+    "revisor": (CONTRATO_REVISOR,),
+}
+CONTRATOS_VALIDOS = frozenset({"notas", "texto", CONTRATO_REVISOR})
+INSTRUCCIONES_MAX_CHARS = 2000
+
+#: Placeholders que ``instrucciones`` puede usar (se renderizan con el spec).
+PLACEHOLDERS_INSTRUCCIONES = frozenset(
+    {"marca", "concepto", "tema", "idioma", "audiencia", "tono",
+     "contexto_cultural", "guia_de_estilo", "restricciones", "estilo_maestro"}
+)
+_PLACEHOLDER_PATTERN = re.compile(r"\{([a-z_]+)\}")
+
+
+def _problemas_de_custom(rol: str, config: "AgentConfig") -> List[str]:
+    """Problemas de SEMÁNTICA de un agente custom (§9.7-10 de la spec).
+
+    La forma cruda (tipos/claves TOML) la valida ``_mapear_agentes``; aquí se
+    chequea la coherencia de la configuración ya parseada. El catálogo de
+    entradas vive en el registro (import diferido, mismo motivo que en
+    ``FlowSpec.validar``).
+    """
+    problemas: List[str] = []
+    assert config.tipo is not None  # solo se llama con customs
+
+    if not ROL_CUSTOM_PATTERN.match(rol) or len(rol) > ROL_CUSTOM_MAX_CHARS:
+        problemas.append(
+            f"el rol custom '{rol}' debe ser un slug de hasta "
+            f"{ROL_CUSTOM_MAX_CHARS} caracteres ([a-z0-9_], empieza con letra)."
+        )
+    if config.contrato is None:
+        problemas.append(
+            f"el agente custom '{rol}' exige 'contrato' "
+            f"({', '.join(sorted(CONTRATOS_VALIDOS))})."
+        )
+    elif config.contrato not in CONTRATOS_POR_TIPO[config.tipo]:
+        problemas.append(
+            f"el contrato '{config.contrato}' no es válido para un agente custom "
+            f"de tipo '{config.tipo}' (permitidos: "
+            f"{', '.join(CONTRATOS_POR_TIPO[config.tipo])}); un 'revisor' exige "
+            f"el contrato '{CONTRATO_REVISOR}' (la compuerta depende de esa "
+            "semántica)."
+        )
+    if config.instrucciones is None or not config.instrucciones.strip():
+        problemas.append(
+            f"el agente custom '{rol}' exige 'instrucciones': su prompt base "
+            "puede usar placeholders como {marca} o {audiencia}."
+        )
+    else:
+        if len(config.instrucciones) > INSTRUCCIONES_MAX_CHARS:
+            problemas.append(
+                f"'instrucciones' del agente custom '{rol}' no puede superar "
+                f"{INSTRUCCIONES_MAX_CHARS} caracteres "
+                f"(recibidos: {len(config.instrucciones)})."
+            )
+        desconocidos = sorted(
+            {
+                nombre
+                for nombre in _PLACEHOLDER_PATTERN.findall(config.instrucciones)
+                if nombre not in PLACEHOLDERS_INSTRUCCIONES
+            }
+        )
+        if desconocidos:
+            problemas.append(
+                f"'instrucciones' del agente custom '{rol}' usa placeholders "
+                f"desconocidos: {', '.join(desconocidos)} (válidos: "
+                f"{', '.join(sorted(PLACEHOLDERS_INSTRUCCIONES))})."
+            )
+    if not config.entradas:
+        problemas.append(
+            f"el agente custom '{rol}' exige 'entradas': los bloques del estado "
+            "que recibe en su mensaje (p. ej. [\"capitulo\", \"lore\"])."
+        )
+    else:
+        from sinnema.application.registry import CATALOGO_ENTRADAS
+
+        fuera_de_catalogo = [
+            entrada for entrada in config.entradas if entrada not in CATALOGO_ENTRADAS
+        ]
+        if fuera_de_catalogo:
+            problemas.append(
+                f"'entradas' del agente custom '{rol}' fuera del catálogo: "
+                f"{', '.join(fuera_de_catalogo)} "
+                f"(válidas: {', '.join(sorted(CATALOGO_ENTRADAS))})."
+            )
+    return problemas
+
 
 @dataclass(frozen=True)
 class AgentConfig:
@@ -66,6 +168,11 @@ class AgentConfig:
     Todo opcional y ``None``/vacío significa "usa el default global". Las
     ``reglas`` se apendan al final del prompt del sistema del rol; la
     precedencia de proveedor/modelo/temperatura es proyecto > entorno > default.
+
+    Un agente CUSTOM se declara con ``tipo`` (contexto | enriquecedor |
+    revisor): exige ``instrucciones`` (su prompt base), ``contrato`` (salida
+    genérica: notas | texto | dictamen) y ``entradas`` (bloques del estado que
+    recibe en el mensaje). Los roles del registro ignoran estos campos.
     """
 
     activo: bool = True
@@ -73,6 +180,11 @@ class AgentConfig:
     proveedor: Optional[str] = None
     modelo: Optional[str] = None
     temperatura: Optional[float] = None
+    #: La presencia de ``tipo`` convierte al rol en custom (fuera del registro).
+    tipo: Optional[str] = None
+    contrato: Optional[str] = None
+    entradas: Tuple[str, ...] = ()
+    instrucciones: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.temperatura is not None and not (
@@ -87,6 +199,10 @@ class AgentConfig:
             raise ValueError(
                 f"proveedor debe ser uno de: {validos} (recibido: '{self.proveedor}')."
             )
+
+    @property
+    def es_custom(self) -> bool:
+        return self.tipo is not None
 
 
 @dataclass(frozen=True)
@@ -120,6 +236,243 @@ class PipelineConfig:
 
 
 @dataclass(frozen=True)
+class FlowSpec:
+    """Flujo del pipeline declarado por el proyecto (sección opcional ``[flujo]``).
+
+    Composición por fases del capítulo (ver ``registry.TipoAgente``): qué roles
+    participan y en qué orden, más el ``hasta``: el último hito del pipeline
+    que la corrida alcanza (``ALCANCES``, default ``produccion``). Sin sección
+    ``[flujo]`` el proyecto no declara nada (``ProjectSpec.flujo is None``) y
+    ``resolver_flujo`` reconstruye la topología legacy: los seis roles, donde
+    ``activo = false`` conserva su cortocircuito.
+
+    Los roles estructurales (``planner``, ``scriptwriter``) nunca se listan:
+    siempre participan y sus nodos son del builder, no de estas fases.
+    """
+
+    contexto: Tuple[str, ...] = ()
+    transformaciones: Tuple[str, ...] = ()
+    #: Rol compuerta (tipo ``revisor``); ``None`` = aprobación directa.
+    revisor: Optional[str] = None
+    enriquecimiento: Tuple[str, ...] = ()
+    hasta: str = ALCANCE_DEFAULT
+    #: False en el flujo implícito legacy (reconstruido sin sección ``[flujo]``):
+    #: allí la participación la decide ``activo``, no la lista.
+    declarado: bool = True
+
+    def validar(self, agentes: Mapping[str, "AgentConfig"]) -> List[str]:
+        """Devuelve TODOS los problemas de composición y alcance del flujo.
+
+        Acepta roles custom: los ``[agentes.<rol>]`` que declaran ``tipo``
+        son roles conocidos con ese tipo (la validez de su configuración la
+        chequea ``ProjectSpec.validate``).
+        """
+        problemas: List[str] = []
+        # Import diferido: el registro importa este módulo (ciclo registry ->
+        # prompts -> projects); en tiempo de llamada ya está construido.
+        from sinnema.application.registry import AGENT_REGISTRY
+
+        tipos_extra = {
+            rol: config.tipo
+            for rol, config in agentes.items()
+            if config.es_custom
+        }
+
+        def _tipo_de(rol: str) -> Optional[str]:
+            definicion = AGENT_REGISTRY.get(rol)
+            if definicion is not None:
+                return definicion.tipo
+            return tipos_extra.get(rol)
+
+        fases = (
+            ("contexto", "contexto", self.contexto),
+            ("transformaciones", "transformador", self.transformaciones),
+            ("enriquecimiento", "enriquecedor", self.enriquecimiento),
+        )
+        listados: List[str] = []
+        for fase, tipo, roles in fases:
+            for rol in roles:
+                tipo_rol = _tipo_de(rol)
+                if tipo_rol is None:
+                    problemas.append(
+                        f"rol desconocido '{rol}' en '{fase}' de [flujo] "
+                        f"(roles del registro: {', '.join(sorted(AGENT_REGISTRY))}; "
+                        "o decláralo como custom en [agentes.<rol>] con su 'tipo')."
+                    )
+                    continue
+                if rol in ROLES_ESENCIALES:
+                    problemas.append(
+                        f"el rol '{rol}' es estructural y no se lista en [flujo]: "
+                        "siempre participa del pipeline."
+                    )
+                    continue
+                if tipo_rol != tipo:
+                    problemas.append(
+                        f"el rol '{rol}' es de tipo '{tipo_rol}' y no puede "
+                        f"ir en la fase '{fase}' de [flujo]."
+                    )
+                if rol in listados:
+                    problemas.append(
+                        f"el rol '{rol}' está repetido en [flujo]: un rol aparece "
+                        "una sola vez en todo el flujo."
+                    )
+                listados.append(rol)
+        if self.revisor is not None:
+            tipo_revisor = _tipo_de(self.revisor)
+            if tipo_revisor is None:
+                problemas.append(
+                    f"rol desconocido '{self.revisor}' en 'revisor' de [flujo] "
+                    f"(roles del registro: {', '.join(sorted(AGENT_REGISTRY))}; "
+                    "o decláralo como custom en [agentes.<rol>] con su 'tipo')."
+                )
+            elif self.revisor in ROLES_ESENCIALES:
+                problemas.append(
+                    f"el rol '{self.revisor}' es estructural y no se lista en "
+                    "[flujo]: siempre participa del pipeline."
+                )
+            elif tipo_revisor != "revisor":
+                problemas.append(
+                    f"el rol '{self.revisor}' es de tipo '{tipo_revisor}' y no "
+                    "puede hacer de 'revisor' en [flujo]."
+                )
+            elif self.revisor in listados:
+                problemas.append(
+                    f"el rol '{self.revisor}' está repetido en [flujo]: un rol "
+                    "aparece una sola vez en todo el flujo."
+                )
+            listados.append(self.revisor)
+
+        # Con [flujo] la lista es la fuente de verdad: apagar un rol listado
+        # es contradicción (error accionable); en los no listados se ignora.
+        for rol in listados:
+            config = agentes.get(rol)
+            if config is not None and not config.activo:
+                problemas.append(
+                    f"el rol '{rol}' tiene activo = false pero está listado en "
+                    "[flujo]: quítalo del flujo (con [flujo], la lista manda)."
+                )
+
+        problemas.extend(self.validar_alcance())
+        return problemas
+
+    def validar_alcance(self) -> List[str]:
+        """Coherencia del ``hasta`` con el vocabulario y con la compuerta."""
+        problemas: List[str] = []
+        if self.hasta not in ALCANCES:
+            problemas.append(
+                f"'hasta' en [flujo] debe ser uno de: {', '.join(ALCANCES)} "
+                f"(default: '{ALCANCE_DEFAULT}'; recibido: '{self.hasta}')."
+            )
+        elif (
+            ALCANCES.index(self.hasta) >= ALCANCES.index(ALCANCE_COMPUERTA)
+            and self.revisor is None
+        ):
+            problemas.append(
+                f"el hito '{self.hasta}' exige declarar un 'revisor' en [flujo]: "
+                "los capítulos descartados solo pueden surgir de la compuerta "
+                "de calidad."
+            )
+        return problemas
+
+    def truncado(self) -> "FlowSpec":
+        """El mismo flujo cortado en el hito ``hasta``: el flujo EFECTIVO.
+
+        Los roles declarados por encima del hito no corren (permitido: el flujo
+        puede declararse completo y compartirse entre shows). ``guion_final``
+        con cero transformaciones es válido (equivale a ``guion``).
+        """
+        if self.hasta not in ALCANCES:
+            return self  # hito inválido: ya se reporta en validar()
+        corte = ALCANCES.index(self.hasta)
+        return FlowSpec(
+            contexto=self.contexto if corte >= ALCANCES.index("guion") else (),
+            transformaciones=(
+                self.transformaciones if corte >= ALCANCES.index("guion_final") else ()
+            ),
+            revisor=self.revisor if corte >= ALCANCES.index("auditado") else None,
+            enriquecimiento=(
+                self.enriquecimiento if corte >= ALCANCES.index("produccion") else ()
+            ),
+            hasta=self.hasta,
+            declarado=self.declarado,
+        )
+
+    def roles_completos(self) -> Tuple[str, ...]:
+        """Todos los roles que el flujo efectivo pone a trabajar, en orden.
+
+        Incluye los estructurales (``planner``, ``scriptwriter``) salvo cuando
+        el hito ``plan`` corta antes de escribir guiones: allí solo el planner
+        necesita agente.
+        """
+        if self.hasta == "plan":
+            return (ROLE_PLANNER,)
+        roles = [ROLE_PLANNER, *self.contexto, ROLE_SCRIPTWRITER, *self.transformaciones]
+        if self.revisor is not None:
+            roles.append(self.revisor)
+        roles.extend(self.enriquecimiento)
+        return tuple(roles)
+
+    def cadena(self) -> str:
+        """Los pasos del flujo efectivo en orden, para auditoría y previews."""
+        if self.hasta == "plan":
+            return "plan_series (sin bucle de capítulos)"
+        pasos = [*self.contexto, ROLE_SCRIPTWRITER, *self.transformaciones]
+        if self.revisor is not None:
+            pasos.append(self.revisor)
+        pasos.extend(self.enriquecimiento)
+        pasos.append("commit_episode")
+        return " -> ".join(pasos)
+
+
+def resolver_flujo(project: "ProjectSpec") -> FlowSpec:
+    """Flujo efectivo de un proyecto: fases truncadas por el hito.
+
+    Sin sección ``[flujo]`` reconstruye la topología legacy (los seis roles en
+    el orden histórico): los nodos existen para todos y el cortocircuito por
+    ``activo = false`` queda dentro de cada nodo, igual que siempre.
+    """
+    if project.flujo is None:
+        return FlowSpec(
+            contexto=(ROLE_CONTINUITY,),
+            transformaciones=(ROLE_ADAPTER,),
+            revisor=ROLE_CRITIC,
+            enriquecimiento=(ROLE_DIRECTOR,),
+            hasta=ALCANCE_DEFAULT,
+            declarado=False,
+        )
+    return project.flujo.truncado()
+
+
+def con_hasta(project: "ProjectSpec", hasta: str) -> "ProjectSpec":
+    """Proyecto con el hito sobrescrito para una corrida (CLI ``--hasta``).
+
+    Precedencia: flag > proyecto > default. Un hito por debajo del declarado
+    trunca el flujo; por encima, exige que el flujo provea lo que el hito
+    necesita (p. ej. ``auditado`` sin revisor es un error accionable).
+    """
+    if hasta not in ALCANCES:
+        raise ValueError(
+            f"'hasta' debe ser uno de: {', '.join(ALCANCES)} "
+            f"(default: '{ALCANCE_DEFAULT}'; recibido: '{hasta}')."
+        )
+    declarado = project.flujo if project.flujo is not None else FlowSpec(
+        contexto=(ROLE_CONTINUITY,),
+        transformaciones=(ROLE_ADAPTER,),
+        revisor=ROLE_CRITIC,
+        enriquecimiento=(ROLE_DIRECTOR,),
+        declarado=False,
+    )
+    nuevo = replace(declarado, hasta=hasta)
+    problemas = nuevo.validar_alcance()
+    if problemas:
+        raise ValueError(
+            f"--hasta '{hasta}' incompatible con el flujo del proyecto: "
+            + " | ".join(problemas)
+        )
+    return replace(project, flujo=nuevo)
+
+
+@dataclass(frozen=True)
 class ProjectSpec:
     """Configuración completa de un show: todo lo que varía entre proyectos."""
 
@@ -137,6 +490,10 @@ class ProjectSpec:
     format: FormatProfile
     agentes: Mapping[str, AgentConfig] = field(default_factory=dict)
     pipeline: PipelineConfig = field(default_factory=PipelineConfig)
+    #: Flujo declarado por el proyecto (sección [flujo]); ``None`` = sin sección:
+    #: ``resolver_flujo`` aplica la semántica legacy (los 6 roles menos los
+    #: ``activo = false``, que conservan su cortocircuito).
+    flujo: Optional[FlowSpec] = None
 
     def config_de_agente(self, rol: str) -> AgentConfig:
         """Config del rol para este proyecto (vacía si no se declaró nada)."""
@@ -200,6 +557,30 @@ class ProjectSpec:
                     "pipeline (sin él no hay serie)."
                 )
 
+        # Agentes custom: semántica de tipo/contrato/instrucciones/entradas
+        # (§9.7-10 de la spec) y su participación en el flujo declarado.
+        customs = {rol: cfg for rol, cfg in self.agentes.items() if cfg.es_custom}
+        for rol, config in sorted(customs.items()):
+            problemas.extend(_problemas_de_custom(rol, config))
+        if customs and self.flujo is None:
+            problemas.append(
+                "hay agentes custom declarados en [agentes] pero el proyecto no "
+                "declara [flujo]: un agente custom solo corre listado en un "
+                "[flujo] (añade la sección o conviértelo en agente de código)."
+            )
+        if customs and self.flujo is not None:
+            listados = set(self.flujo.roles_completos())
+            for rol in sorted(customs):
+                if rol not in listados:
+                    problemas.append(
+                        f"el agente custom '{rol}' no está listado en [flujo]: "
+                        "un agente que no participa no tiene efecto (añádelo a "
+                        "una fase o elimina su sección)."
+                    )
+
+        if self.flujo is not None:
+            problemas.extend(self.flujo.validar(self.agentes))
+
         if problemas:
             raise ValueError(
                 f"Proyecto '{self.project_id or '?'}' inválido: "
@@ -262,12 +643,23 @@ def _mapear_seccion(
     return {claves[k]: v for k, v in contenido.items() if k in claves}
 
 
-_CLAVES_AGENTE = frozenset({"activo", "reglas", "proveedor", "modelo", "temperatura"})
-_CLAVES_PIPELINE = frozenset({"intentos_maximos_de_critica", "politica_al_agotar"})
+_CLAVES_AGENTE = frozenset(
+    {"activo", "reglas", "proveedor", "modelo", "temperatura",
+     "tipo", "contrato", "entradas", "instrucciones"}
+)
+
+#: Un rol custom es un slug nuevo (nombra su nodo del grafo y el sufijo de
+#: sus variables de entorno LLM_PROVIDER_<ROL>).
+ROL_CUSTOM_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
+ROL_CUSTOM_MAX_CHARS = 30
 
 
 def _mapear_agentes(datos: Dict[str, Any], problemas: List[str]) -> Dict[str, AgentConfig]:
-    """Parsea ``[agentes.<rol>]`` acumulando todos los problemas de una vez."""
+    """Parsea ``[agentes.<rol>]`` acumulando todos los problemas de una vez.
+
+    Acepta los roles del registro y, además, roles CUSTOM: un rol fuera del
+    registro es válido si declara ``tipo`` (ver ``AgentConfig``).
+    """
     crudo = datos.get("agentes")
     if crudo is None:
         return {}
@@ -278,11 +670,14 @@ def _mapear_agentes(datos: Dict[str, Any], problemas: List[str]) -> Dict[str, Ag
     configs: Dict[str, AgentConfig] = {}
     for rol, cfg in crudo.items():
         if rol not in ROLES_CONFIGURABLES:
-            problemas.append(
-                f"[agentes.{rol}] no es un rol configurable "
-                f"(válidos: {', '.join(ROLES_CONFIGURABLES)})."
-            )
-            continue
+            es_candidato_custom = isinstance(cfg, dict) and "tipo" in cfg
+            if not es_candidato_custom:
+                problemas.append(
+                    f"[agentes.{rol}] no es un rol configurable "
+                    f"(válidos: {', '.join(ROLES_CONFIGURABLES)}; para un agente "
+                    "custom declara su 'tipo')."
+                )
+                continue
         if not isinstance(cfg, dict):
             problemas.append(f"[agentes.{rol}] debe ser una tabla TOML")
             continue
@@ -324,6 +719,46 @@ def _mapear_agentes(datos: Dict[str, Any], problemas: List[str]) -> Dict[str, Ag
             problemas.append(f"'temperatura' en [agentes.{rol}] debe ser numérica.")
             temperatura = None
 
+        # --- Agentes custom: forma de tipo/contrato/entradas/instrucciones ---
+        tipo = cfg.get("tipo")
+        if tipo is not None:
+            if not isinstance(tipo, str) or tipo not in TIPOS_CUSTOM:
+                problemas.append(
+                    f"'tipo' en [agentes.{rol}] debe ser uno de: "
+                    f"{', '.join(TIPOS_CUSTOM)} (recibido: '{tipo}')."
+                )
+                tipo = None
+            elif rol in ROLES_CONFIGURABLES:
+                problemas.append(
+                    f"[agentes.{rol}] declara 'tipo' pero ya existe en el "
+                    "registro: los agentes custom usan un rol nuevo."
+                )
+                tipo = None
+        contrato = cfg.get("contrato")
+        if contrato is not None and (
+            not isinstance(contrato, str) or contrato not in CONTRATOS_VALIDOS
+        ):
+            problemas.append(
+                f"'contrato' en [agentes.{rol}] debe ser uno de: "
+                f"{', '.join(sorted(CONTRATOS_VALIDOS))} (recibido: '{contrato}')."
+            )
+            contrato = None
+        entradas_crudas = cfg.get("entradas", [])
+        if not isinstance(entradas_crudas, list) or not all(
+            isinstance(e, str) for e in entradas_crudas
+        ):
+            problemas.append(
+                f"'entradas' en [agentes.{rol}] debe ser una lista de textos."
+            )
+            entradas_crudas = []
+        entradas = tuple(e.strip() for e in entradas_crudas if e and e.strip())
+        instrucciones = cfg.get("instrucciones")
+        if instrucciones is not None and not isinstance(instrucciones, str):
+            problemas.append(
+                f"'instrucciones' en [agentes.{rol}] debe ser texto."
+            )
+            instrucciones = None
+
         try:
             configs[rol] = AgentConfig(
                 activo=activo,
@@ -331,10 +766,20 @@ def _mapear_agentes(datos: Dict[str, Any], problemas: List[str]) -> Dict[str, Ag
                 proveedor=proveedor.strip().lower() if proveedor else None,
                 modelo=modelo.strip() if modelo else None,
                 temperatura=float(temperatura) if temperatura is not None else None,
+                tipo=tipo,
+                contrato=contrato,
+                entradas=entradas,
+                instrucciones=instrucciones,
             )
         except ValueError as exc:
             problemas.append(f"[agentes.{rol}] inválido: {exc}")
     return configs
+_CLAVES_PIPELINE = frozenset({"intentos_maximos_de_critica", "politica_al_agotar"})
+_CLAVES_FLUJO = frozenset(
+    {"contexto", "transformaciones", "revisor", "enriquecimiento", "hasta"}
+)
+
+
 
 
 def _mapear_pipeline(datos: Dict[str, Any], problemas: List[str]) -> PipelineConfig:
@@ -377,6 +822,67 @@ def _mapear_pipeline(datos: Dict[str, Any], problemas: List[str]) -> PipelineCon
         return PipelineConfig()
 
 
+def _mapear_flujo(datos: Dict[str, Any], problemas: List[str]) -> Optional[FlowSpec]:
+    """Parsea la sección opcional ``[flujo]`` (composición + alcance).
+
+    Devuelve ``None`` si la sección no existe (semántica legacy intacta). Los
+    problemas de SHAPE se acumulan aquí; los de semántica (roles desconocidos,
+    repetidos, ``activo = false``, coherencia del hito) los reporta
+    ``FlowSpec.validar`` en ``ProjectSpec.validate``: todos juntos.
+    """
+    crudo = datos.get("flujo")
+    if crudo is None:
+        return None
+    if not isinstance(crudo, dict):
+        problemas.append("la sección [flujo] debe ser una tabla TOML")
+        return None
+    for clave in crudo:
+        if clave not in _CLAVES_FLUJO:
+            problemas.append(
+                f"clave desconocida '{clave}' en [flujo] "
+                f"(válidas: {', '.join(sorted(_CLAVES_FLUJO))})."
+            )
+
+    def _fase_lista(nombre: str) -> Tuple[str, ...]:
+        valor = crudo.get(nombre)
+        if valor is None:
+            return ()
+        if not isinstance(valor, list) or not all(
+            isinstance(rol, str) for rol in valor
+        ):
+            problemas.append(
+                f"'{nombre}' en [flujo] debe ser una lista de roles (texto)."
+            )
+            return ()
+        return tuple(rol.strip() for rol in valor if rol.strip())
+
+    revisor = crudo.get("revisor")
+    if revisor is not None:
+        if not isinstance(revisor, str) or not revisor.strip():
+            problemas.append(
+                "'revisor' en [flujo] debe ser el rol (texto) del agente compuerta."
+            )
+            revisor = None
+        else:
+            revisor = revisor.strip()
+
+    hasta = crudo.get("hasta", ALCANCE_DEFAULT)
+    if not isinstance(hasta, str) or not hasta.strip():
+        problemas.append(
+            f"'hasta' en [flujo] debe ser texto: uno de {', '.join(ALCANCES)} "
+            f"(default: '{ALCANCE_DEFAULT}')."
+        )
+        hasta = ALCANCE_DEFAULT
+
+    return FlowSpec(
+        contexto=_fase_lista("contexto"),
+        transformaciones=_fase_lista("transformaciones"),
+        revisor=revisor,
+        enriquecimiento=_fase_lista("enriquecimiento"),
+        hasta=hasta.strip(),
+    )
+
+
 def project_from_dict(datos: Dict[str, Any]) -> ProjectSpec:
     """Construye y valida un ``ProjectSpec`` desde el dict parseado del TOML."""
     problemas: List[str] = []
@@ -400,6 +906,11 @@ def project_from_dict(datos: Dict[str, Any]) -> ProjectSpec:
 
     agentes = _mapear_agentes(datos, problemas)
     pipeline = _mapear_pipeline(datos, problemas)
+    flujo = _mapear_flujo(datos, problemas)
+    if flujo is not None:
+        # Semántica del flujo junto al resto de los problemas (§9: todos se
+        # reportan de una vez al cargar el proyecto).
+        problemas.extend(flujo.validar(agentes))
     if problemas:
         raise ValueError(
             "Archivo de proyecto mal formado: " + "; ".join(problemas) + "."
@@ -412,6 +923,7 @@ def project_from_dict(datos: Dict[str, Any]) -> ProjectSpec:
         format=perfil,
         agentes=agentes,
         pipeline=pipeline,
+        flujo=flujo,
     )
     spec.validate()
     return spec

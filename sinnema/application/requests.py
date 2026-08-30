@@ -13,6 +13,7 @@ from sinnema.application.projects import (
     TOPIC_MAX_CHARS,
     TOPIC_MIN_CHARS,
     ProjectSpec,
+    resolver_flujo,
 )
 from sinnema.application.state import PipelineState
 from sinnema.domain.constants import SERIES_MAX_CHAPTERS
@@ -75,6 +76,8 @@ def build_initial_state(
 
     ``initial_lore`` siembra la memoria de continuidad persistida del proyecto
     (vacía en la primera corrida); el grafo la amplía de forma append-only.
+    El ``alcance`` (hito del flujo resuelto) viaja en el estado: el
+    consolidador lo estampa en el entregable.
     """
     request.validate()
     proyecto = request.project
@@ -90,6 +93,7 @@ def build_initial_state(
         "constraints": proyecto.constraints,
         "num_chapters": request.num_chapters,
         "max_critique_attempts": request.max_critique_attempts,
+        "alcance": resolver_flujo(proyecto).hasta,
         # d) Runtime
         "current_chapter_index": 0,
         "critique_attempts": 0,

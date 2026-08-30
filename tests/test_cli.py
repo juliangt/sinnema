@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 
 import pytest
 
@@ -10,9 +11,10 @@ from sinnema.infrastructure.cli.main import (
     _int_en_rango,
     _parse_args,
     build_request_from_args,
+    proyecto_para_corrida,
 )
 
-from conftest import TEMA, make_project
+from conftest import TEMA, FakeGateway, make_draft, make_directives, make_plan, make_project
 
 
 def _args(**overrides) -> argparse.Namespace:
@@ -21,6 +23,7 @@ def _args(**overrides) -> argparse.Namespace:
         topic=None,
         chapters=3,
         max_critique_attempts=2,
+        hasta=None,
         output=None,
         verbose=False,
         list_projects=False,
@@ -97,6 +100,54 @@ def test_list_projects_se_parsea(monkeypatch):
     assert _parse_args().list_projects is True
 
 
+# -------------------------------- --hasta --------------------------------
+
+
+def test_hasta_por_defecto_es_none(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["sinnema"])
+    assert _parse_args().hasta is None
+
+
+def test_hasta_valido_se_parsea(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["sinnema", "--hasta", "guion_final"])
+    assert _parse_args().hasta == "guion_final"
+
+
+def test_hasta_invalido_corta_la_ejecucion_con_error_accionable(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["sinnema", "--hasta", "video"])
+    with pytest.raises(SystemExit) as excinfo:
+        _parse_args()
+    assert excinfo.value.code == 2
+
+
+def test_sin_flag_el_proyecto_manda_intacto():
+    proyecto = make_project()  # sin [flujo]: la corrida no altera el spec
+    assert proyecto_para_corrida(_args(), proyecto) is proyecto
+
+
+def test_flag_hasta_gana_al_proyecto():
+    from sinnema.domain.constants import ALCANCE_DEFAULT
+
+    proyecto = make_project()
+    corrida = proyecto_para_corrida(_args(hasta="guion"), proyecto)
+    assert corrida is not proyecto
+    assert corrida.flujo.hasta == "guion"
+    assert proyecto.flujo is None  # el spec original no se muta
+    # El default del vocabulario sigue siendo 'produccion' (§5).
+    assert ALCANCE_DEFAULT == "produccion"
+
+
+def test_flag_hasta_incoherente_con_flujo_es_error_accionable():
+    from sinnema.application.projects import AgentConfig, FlowSpec
+
+    proyecto = make_project(
+        flujo=FlowSpec(contexto=("continuity",), hasta="guion"),
+        agentes={"critic": AgentConfig(activo=True)},
+    )
+    with pytest.raises(ValueError, match="revisor"):
+        proyecto_para_corrida(_args(hasta="auditado"), proyecto)
+
+
 # --------------------------- build_request_from_args ---------------------------
 
 
@@ -119,3 +170,45 @@ def test_peticion_con_tema_explicito_gana_al_proyecto():
 def test_peticion_con_tema_corto_rechazada():
     with pytest.raises(ValueError, match="tema"):
         build_request_from_args(_args(topic="corto"), make_project())
+
+
+# ------------------------- corrida de punta a punta -------------------------
+
+
+def test_corrida_cli_con_hasta_guion_entrega_borradores_sin_specs(
+    monkeypatch, tmp_path, capsys
+):
+    """CLI de punta a punta con puertos nulos y ``--hasta guion``.
+
+    El proyecto legacy corre con el FakeGateway y el hito de la flag corta el
+    pipeline tras el escritor: episodios con ``technical`` nulo y cero
+    invocaciones a adaptador/crítico/director. El resumen menciona el alcance.
+    """
+    import sinnema.infrastructure.cli.main as cli_main
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["sinnema", "-p", "sinnema", "--hasta", "guion", "-n", "1",
+         "-o", "salidas/serie.json"],
+    )
+    proyecto = make_project()
+    monkeypatch.setattr(cli_main, "load_project", lambda pid: proyecto)
+
+    gw = FakeGateway()
+    gw.add("planner", [make_plan(1)])
+    gw.add("continuity", [make_directives()])
+    gw.add("scriptwriter", [make_draft("ch-01")])
+    monkeypatch.setattr(cli_main, "build_gateway", lambda p: gw)
+
+    assert cli_main.main() == 0
+
+    salida = capsys.readouterr().out
+    assert "Alcance de la corrida: guion" in salida
+    datos = json.loads((tmp_path / "salidas" / "serie.json").read_text())
+    assert datos["alcance"] == "guion"
+    assert datos["schema_version"] == "1.1"
+    assert len(datos["episodes"]) == 1
+    assert datos["episodes"][0]["technical"] is None
+    assert datos["episodes"][0]["audit"] is None
+    assert set(gw.calls) == {"planner", "continuity", "scriptwriter"}
