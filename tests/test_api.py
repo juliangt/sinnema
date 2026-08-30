@@ -401,6 +401,30 @@ def test_flujo_efectivo_de_proyecto_inexistente_es_404(cliente):
     assert client.get("/api/projects/no-existe/flujo-efectivo").status_code == 404
 
 
+def test_flujo_efectivo_expone_los_agentes_custom(gestion):
+    client, _, _, _ = gestion
+    client.post("/api/projects", json=_proyecto_json(
+        flujo={"contexto": ["fact_checker"], "revisor": "critic"},
+        agentes={
+            "fact_checker": {
+                "tipo": "contexto",
+                "contrato": "notas",
+                "entradas": ["capitulo", "lore"],
+                "instrucciones": "Verifica los datos de {marca}.",
+            },
+        },
+    ))
+    cuerpo = client.get("/api/projects/mi-show/flujo-efectivo").json()
+    assert cuerpo["fases"]["contexto"] == ["fact_checker"]
+    assert cuerpo["custom"] == [{
+        "rol": "fact_checker",
+        "tipo": "contexto",
+        "contrato": "notas",
+        "entradas": ["capitulo", "lore"],
+        "descripcion": "Agente custom (contexto; contrato notas)",
+    }]
+
+
 def test_crear_proyecto_con_flujo_invalido_reporta_problemas(gestion):
     client, _, _, _ = gestion
     res = client.post("/api/projects", json=_proyecto_json(flujo={

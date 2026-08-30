@@ -43,7 +43,7 @@ from sinnema.application.graph import build_pipeline_graph
 from sinnema.application.ports import ROLE_PLANNER, ROLE_SCRIPTWRITER
 from sinnema.application.projects import ROLES_ESENCIALES, resolver_flujo
 from sinnema.application.prompts import build_role_system_prompts
-from sinnema.application.registry import AGENT_REGISTRY
+from sinnema.application.registry import AGENT_REGISTRY, definiciones_custom
 from sinnema.application.requests import MAX_CRITIQUE_ATTEMPTS_LIMIT
 from sinnema.application.use_cases import limite_de_recursion
 from sinnema.domain.constants import SERIES_MAX_CHAPTERS
@@ -226,6 +226,16 @@ def create_app(
                 raise RuntimeError("El diagrama del grafo no ejecuta el pipeline.")
 
         grafo = build_pipeline_graph(_GatewayNulo(), proyecto)
+        customs = [
+            {
+                "rol": rol,
+                "tipo": definicion.tipo,
+                "contrato": proyecto.agentes[rol].contrato,
+                "entradas": list(proyecto.agentes[rol].entradas),
+                "descripcion": definicion.descripcion,
+            }
+            for rol, definicion in definiciones_custom(proyecto).items()
+        ]
         return {
             "project_id": proyecto.project_id,
             "declarado": flujo.declarado,
@@ -238,6 +248,7 @@ def create_app(
                 "revisor": flujo.revisor,
                 "enriquecimiento": list(flujo.enriquecimiento),
             },
+            "custom": customs,
             "limite_recursion": limite_de_recursion(flujo, 3, 2),
             "mermaid": grafo.get_graph().draw_mermaid(),
         }

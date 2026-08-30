@@ -14,9 +14,11 @@ from typing import Any, Dict, Mapping, Optional, Type, TypeVar
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
+from pydantic import BaseModel
 
 from sinnema.application.ports import ROLE_SCHEMAS
 from sinnema.application.projects import ProjectSpec, resolver_flujo
+from sinnema.application.registry import definiciones_del_proyecto
 from sinnema.infrastructure.llm.providers import build_role_clients
 
 logger = logging.getLogger("sinnema.infrastructure.gateway")
@@ -47,11 +49,17 @@ class LangChainStructuredGateway:
         self,
         clients: Mapping[str, BaseChatModel],
         retry_policy: Optional[RetryPolicy] = None,
+        schemas: Optional[Mapping[str, Type[BaseModel]]] = None,
     ) -> None:
         self._retry_policy = retry_policy or RetryPolicy()
+        #: Catálogo rol -> contrato. Por defecto, el del registro global; un
+        #: proyecto con agentes custom aporta su catálogo extendido.
+        self._schemas: Mapping[str, Type[BaseModel]] = (
+            schemas if schemas is not None else ROLE_SCHEMAS
+        )
 
         roles_solicitados = set(clients)
-        roles_conocidos = set(ROLE_SCHEMAS)
+        roles_conocidos = set(self._schemas)
         desconocidos = sorted(roles_solicitados - roles_conocidos)
         if desconocidos:
             raise ValueError(
@@ -62,7 +70,7 @@ class LangChainStructuredGateway:
         # al invocar ``generate`` (un nodo activo jamás debería pedirlos).
 
         self._structured: Dict[str, Any] = {
-            role: clients[role].with_structured_output(ROLE_SCHEMAS[role])
+            role: clients[role].with_structured_output(self._schemas[role])
             for role in clients
         }
 
@@ -78,9 +86,9 @@ class LangChainStructuredGateway:
                 f"El rol '{role}' no tiene cliente LLM configurado: si está "
                 "desactivado en el proyecto, ningún nodo debería invocarlo."
             )
-        if schema is not ROLE_SCHEMAS[role]:
+        if schema is not self._schemas[role]:
             raise ValueError(
-                f"El rol '{role}' genera '{ROLE_SCHEMAS[role].__name__}' pero se "
+                f"El rol '{role}' genera '{self._schemas[role].__name__}' pero se "
                 f"solicitó '{getattr(schema, '__name__', schema)}': esquema y rol "
                 "no coinciden (bug de wiring)."
             )
@@ -129,11 +137,23 @@ def _roles_con_cliente(project: ProjectSpec) -> list[str]:
     flujo = resolver_flujo(project)
     en_flujo = set(flujo.roles_completos())
     if flujo.declarado:
-        return [rol for rol in ROLE_SCHEMAS if rol in en_flujo]
+        return [rol for rol in definiciones_del_proyecto(project) if rol in en_flujo]
     return [
         rol for rol in ROLE_SCHEMAS
         if rol in en_flujo and project.agente_activo(rol)
     ]
+
+
+def _esquemas_del_proyecto(project: ProjectSpec) -> Mapping[str, Type[BaseModel]]:
+    """Catálogo rol -> contrato del proyecto: registro global + customs."""
+    return {
+        **ROLE_SCHEMAS,
+        **{
+            rol: definicion.esquema
+            for rol, definicion in definiciones_del_proyecto(project).items()
+        },
+    }
+
 
 def build_gateway(
     project: Optional[ProjectSpec] = None,
@@ -146,10 +166,14 @@ def build_gateway(
     (precedencia proyecto > entorno > default) y construye clientes solo para
     los roles del flujo efectivo: un rol que no corre (fuera del ``[flujo]``,
     truncado por ``hasta`` o desactivado en un proyecto legacy) no exige su
-    clave de proveedor.
+    clave de proveedor. Los agentes custom aportan su contrato genérico al
+    catálogo de esquemas del gateway.
     """
+    schemas: Optional[Mapping[str, Type[BaseModel]]] = None
     if role_clients is None:
         overrides = project.agentes if project is not None else None
         solo_roles = _roles_con_cliente(project) if project is not None else None
         role_clients = build_role_clients(overrides=overrides, solo_roles=solo_roles)
-    return LangChainStructuredGateway(dict(role_clients), retry_policy)
+    if project is not None:
+        schemas = _esquemas_del_proyecto(project)
+    return LangChainStructuredGateway(dict(role_clients), retry_policy, schemas)

@@ -413,14 +413,27 @@ idéntico en contenido al 1.0 de hoy (salvo version/alcance); proyecto con
 `hasta = "guion_final"` entrega series sin specs de video validadas de punta a
 punta; `hasta = "plan"` entrega outline sin episodios.
 
-### Fase 2 — Agentes custom desde TOML/web
+### Fase 2 — Agentes custom desde TOML/web — **IMPLEMENTADA** ✓
 
-1. Contratos genéricos (`notas`, `dictamen`, `texto`) y render de bloques de
-   contexto.
-2. `[agentes.<rol>]` extendido: `instrucciones`, `tipo`, `entradas`,
-   `contrato` + validaciones (§9.7–10).
-3. Nodos custom en el builder; defaults LLM genéricos para roles custom.
-4. UI: creación/edición de agentes custom + inserción en el editor de flujo.
+1. Contratos genéricos en `domain/models/genericos.py` (`NotasDelAgente`,
+   `TextoLibre`) y `CONTRATOS_GENERICOS` en el registro.
+2. `[agentes.<rol>]` extendido (`tipo`, `contrato`, `entradas`,
+   `instrucciones`) con las validaciones §9.7-10 en `projects.py`
+   (`_problemas_de_custom` + reglas de participación en `[flujo]`).
+3. `definiciones_custom`/`definiciones_del_proyecto` en el registro
+   sintetizan las `AgentDefinition`; `make_agent_node` empaqueta los
+   adjuntos; la compuerta usa la definición del revisor (custom incluido, con
+   fallback de adaptación identidad cuando el flujo no trae
+   transformaciones); el gateway acepta el catálogo de esquemas del proyecto
+   y `build_role_clients` aplica un default LLM genérico a los roles custom.
+4. API: `flujo-efectivo` expone la lista `custom`; UI: formulario de agentes
+   custom en el editor (rol, tipo, contrato, entradas, instrucciones).
+
+**Desviación registrada**: el contrato `dictamen` de un revisor custom ES el
+`QualityAudit` de dominio (no un esquema `{aprobado, score, hallazgos,
+feedback}` paralelo): la compuerta de calidad depende de esa semántica y
+duplicarla debilitaría la garantía central. Efecto práctico idéntico al
+diseñado.
 
 **Criterio de aceptación**: un agente `fact_checker` creado 100% desde la web
 (rol custom `contexto` con contrato `notas`) corre en un show real y su

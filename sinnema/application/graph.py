@@ -57,6 +57,7 @@ from sinnema.application.registry import (
     AgentDefinition,
     build_role_system_prompts,
     capitulo_actual,
+    definiciones_del_proyecto,
 )
 from sinnema.application.settings import PipelineSettings
 from sinnema.application.state import PipelineState
@@ -65,6 +66,7 @@ from sinnema.domain.services import (
     assemble_episode,
     build_failed_record,
     extract_new_lore,
+    identity_adaptation,
 )
 
 logger = logging.getLogger("sinnema.graph")
@@ -123,7 +125,12 @@ def make_agent_node(
         logger.info("Nodo '%s' completado: %s", definicion.nodo, resumen)
         audit.log_step(definicion.nodo, resumen, artifact=artefacto)
 
-        actualizacion: Dict[str, Any] = {definicion.produce: artefacto}
+        # Un agente custom adjunta a la pizarra ({"rol": artefacto}) para que
+        # el reducer la fusione por clave y el commit lo adjunte al episodio.
+        valor: Any = (
+            {definicion.rol: artefacto} if definicion.adjunto else artefacto
+        )
+        actualizacion: Dict[str, Any] = {definicion.produce: valor}
         if definicion.actualizacion_extra is not None:
             actualizacion.update(definicion.actualizacion_extra(artefacto, state))
         return actualizacion
@@ -190,6 +197,9 @@ def build_pipeline_graph(
     settings = settings or PipelineSettings()
     audit = audit or NullAuditTrail()
     system_prompts = build_role_system_prompts(project)
+    # Catálogo completo del proyecto: registro global + agentes custom del
+    # TOML. El flujo solo referencia roles presentes aquí.
+    definiciones = definiciones_del_proyecto(project)
 
     # ---------------------- NODOS ESTRUCTURALES ----------------------
 
@@ -224,11 +234,15 @@ def build_pipeline_graph(
         """Compuerta de revisión: dictamen + incremento de reintentos.
 
         Nodo estructural: su salida alimenta el router (revise / approve /
-        skip_chapter). Sin crítico activo, aprueba sin dictamen.
+        skip_chapter). Usa la definición del revisor del flujo (el crítico de
+        código o un revisor custom, cuyo contrato ``dictamen`` es igualmente
+        ``QualityAudit``). Sin revisor activo, aprueba sin dictamen.
         """
         _, capitulo, _ = capitulo_actual(state)
-        auditor = AGENT_REGISTRY[ROLE_CRITIC]
-        if not project.agente_activo(ROLE_CRITIC):
+        auditor = definiciones[flujo.revisor] if flujo.revisor is not None else (
+            AGENT_REGISTRY[ROLE_CRITIC]
+        )
+        if not project.agente_activo(auditor.rol):
             logger.info("Crítico desactivado: %s se aprueba sin auditoría.", capitulo.chapter_id)
             audit.log_step(
                 auditor.nodo,
@@ -236,36 +250,44 @@ def build_pipeline_graph(
                 "se aprueba sin dictamen de calidad.",
             )
             return {"qa_verdict": None, "critique_attempts": 0, "pending_feedback": None}
+        # Un flujo puede auditar sin transformaciones aguas arriba: el guion
+        # auditado es entonces el borrador con adaptación identidad (determinista).
+        estado_auditoria = state
+        if state.get("adapted_script") is None and state.get("draft_script") is not None:
+            estado_auditoria = {
+                **state,
+                "adapted_script": identity_adaptation(state["draft_script"]),
+            }
         dictamen = gateway.generate(
             auditor.rol,
             auditor.esquema,
             system_prompts[auditor.rol],
-            auditor.mensaje(project, state),
+            auditor.mensaje(project, estado_auditoria),
         )
         for validar in auditor.validadores:
-            validar(dictamen, project, state)
-        actualizacion: Dict[str, Any] = {
-            "qa_verdict": dictamen,
-            **(auditor.actualizacion_extra(dictamen, state) or {}),
-        }
+            validar(dictamen, project, estado_auditoria)
+        extras = (
+            auditor.actualizacion_extra(dictamen, state)
+            if auditor.actualizacion_extra is not None else {}
+        )
+        actualizacion: Dict[str, Any] = {"qa_verdict": dictamen, **(extras or {})}
+        intento = state.get("critique_attempts", 0) + 1
         # El resumen reporta el intento YA incrementado: se evalúa sobre el
         # estado fusionado con la actualización que devuelve este nodo.
         resumen = (
-            auditor.resumen(dictamen, {**state, **actualizacion})
+            auditor.resumen(dictamen, {**estado_auditoria, **actualizacion, "critique_attempts": intento})
             if auditor.resumen else "Dictamen de calidad."
         )
         audit.log_step(auditor.nodo, resumen, artifact=dictamen)
         if dictamen.approved:
             logger.info(
                 "QA APRUEBA %s (score %d/10, intento %d).",
-                capitulo.chapter_id, dictamen.overall_score,
-                actualizacion["critique_attempts"],
+                capitulo.chapter_id, dictamen.overall_score, intento,
             )
         else:
             logger.info(
                 "QA RECHAZA %s (score %d/10, intento %d): %s",
-                capitulo.chapter_id, dictamen.overall_score,
-                actualizacion["critique_attempts"],
+                capitulo.chapter_id, dictamen.overall_score, intento,
                 dictamen.correction_feedback[:120],
             )
         return actualizacion
@@ -401,7 +423,7 @@ def build_pipeline_graph(
 
     def _agregar_agente(rol: str) -> str:
         """Registra el nodo del rol (nombre estable) y devuelve su nombre."""
-        definicion = AGENT_REGISTRY[rol]
+        definicion = definiciones[rol]
         workflow.add_node(
             definicion.nodo,
             make_agent_node(definicion, gateway, project, system_prompts, audit),
@@ -446,8 +468,12 @@ def build_pipeline_graph(
 
     ultimo_enriquecedor: Optional[str] = None
     if flujo.revisor is not None:
-        workflow.add_node("chief_critic", _chief_critic)
-        workflow.add_edge(cursor, "chief_critic")
+        # El nodo de la compuerta lleva el nombre de su definición
+        # ("chief_critic" para el crítico de código; el rol para un revisor
+        # custom): estable para el checkpointer.
+        nodo_compuerta = definiciones[flujo.revisor].nodo
+        workflow.add_node(nodo_compuerta, _chief_critic)
+        workflow.add_edge(cursor, nodo_compuerta)
         primero: Optional[str] = None
         anterior: Optional[str] = None
         for rol in flujo.enriquecimiento:
@@ -458,7 +484,7 @@ def build_pipeline_graph(
                 workflow.add_edge(anterior, nodo)
             anterior = nodo
         workflow.add_conditional_edges(
-            "chief_critic",
+            nodo_compuerta,
             _route_after_critic,
             {
                 "revise": nodo_escritor,

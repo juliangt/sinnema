@@ -19,6 +19,7 @@ from sinnema.domain.models.deliverable import (
     FinalScene,
     SeriesDeliverable,
 )
+from sinnema.domain.models.genericos import NotasDelAgente, TextoLibre
 from sinnema.domain.models.planning import ChapterOutline, SeriesPlan
 from sinnema.domain.models.project import AspectRatio, FormatProfile
 from sinnema.domain.models.technical import (
@@ -41,12 +42,14 @@ __all__ = [
     "FinalScene",
     "FormatProfile",
     "LoreEntry",
+    "NotasDelAgente",
     "QualityAudit",
     "Scene",
     "ScriptDraft",
     "SeriesDeliverable",
     "SeriesPlan",
     "TechnicalPackage",
+    "TextoLibre",
     "Transition",
     "VisualAssetSpec",
 ]

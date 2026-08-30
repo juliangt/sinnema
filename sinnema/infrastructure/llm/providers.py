@@ -71,6 +71,14 @@ DEFAULT_ROLE_SPECS: Tuple[RoleSpec, ...] = (
     RoleSpec("technical_director", PROVIDER_GOOGLE, "gemini-1.5-pro", 0.4, ("openai", "anthropic", "ollama")),
 )
 
+#: Default genérico para agentes CUSTOM sin asignación propia en
+#: ``DEFAULT_ROLE_SPECS``: un modelo barato y versátil, con la misma cadena de
+#: fallback. El proyecto puede sobreescribirlo vía [agentes.<rol>] o entorno.
+DEFAULT_CUSTOM_ROLE_SPEC = RoleSpec(
+    "<custom>", PROVIDER_OPENAI, "gpt-4o-mini", 0.3,
+    ("anthropic", "google", "ollama"),
+)
+
 
 def provider_available(provider: str) -> bool:
     """True si el paquete del proveedor está instalado y hay credenciales."""
@@ -147,7 +155,29 @@ def build_role_clients(
     """
     overrides = overrides or {}
     clientes: Dict[str, BaseChatModel] = {}
-    for spec_bruto in role_specs:
+    # Los roles sin spec propio (agentes custom) reciben el default genérico;
+    # los overrides [agentes.<rol>] y el entorno los sobreescriben después.
+    specs: list = list(role_specs)
+    if solo_roles is not None:
+        cubiertos = {spec.role for spec in specs}
+        for rol in solo_roles:
+            if rol not in cubiertos:
+                logger.info(
+                    "Rol '%s' es custom: usando el default LLM genérico "
+                    "(%s / %s).", rol,
+                    DEFAULT_CUSTOM_ROLE_SPEC.provider,
+                    DEFAULT_CUSTOM_ROLE_SPEC.model,
+                )
+                specs.append(
+                    RoleSpec(
+                        rol,
+                        DEFAULT_CUSTOM_ROLE_SPEC.provider,
+                        DEFAULT_CUSTOM_ROLE_SPEC.model,
+                        DEFAULT_CUSTOM_ROLE_SPEC.temperature,
+                        DEFAULT_CUSTOM_ROLE_SPEC.fallback_providers,
+                    )
+                )
+    for spec_bruto in specs:
         if solo_roles is not None and spec_bruto.role not in solo_roles:
             continue
         spec = resolve_role_spec(spec_bruto, overrides.get(spec_bruto.role, AgentConfig()))

@@ -76,6 +76,9 @@ details[open] summary { margin-bottom:6px; }
 .fase-bloque { margin:12px 0 4px; }
 .fase-bloque h4 { font-size:.75rem; color:var(--tx2); text-transform:uppercase;
                   letter-spacing:.05em; margin-bottom:6px; }
+.fila-custom { display:flex; align-items:center; gap:10px; padding:6px 0;
+               border-bottom:1px solid rgba(255,255,255,.06); }
+.fila-custom small { flex:1; color:var(--tx2); }
 .errores { background:#2a1616; border:1px solid var(--err); color:var(--err);
            border-radius:10px; padding:12px 16px; margin-top:14px; font-size:.85rem; }
 .errores ul { margin:6px 0 0 18px; }
@@ -241,6 +244,37 @@ listas para producción. Todo vive en archivos TOML: la web los lee y los escrib
         proyecto &gt; entorno &gt; default). Desactivar un agente lo cortocircuita
         sin gastar LLM.</p>
       <div id="editor-agentes"></div>
+
+      <div class="fase-bloque">
+        <h4>Agentes custom <span style="text-transform:none">(definidos aquí; corren listados en el Flujo)</span></h4>
+        <p class="hint">Un agente custom se crea con un rol nuevo, un tipo, un contrato
+          genérico de salida y las entradas del estado que recibe. Después añádelo a una
+          fase de la sección Flujo. Placeholders en las instrucciones:
+          <code>{marca}</code>, <code>{audiencia}</code>, <code>{tono}</code>, <code>{idioma}</code>, <code>{tema}</code>, entre otros.</p>
+        <div class="checks">
+          <label>Rol <input id="f-custom-rol" placeholder="fact_checker" maxlength="30"></label>
+          <label>Tipo
+            <select id="f-custom-tipo">
+              <option value="contexto">contexto</option>
+              <option value="enriquecedor">enriquecedor</option>
+              <option value="revisor">revisor</option>
+            </select></label>
+          <label>Contrato
+            <select id="f-custom-contrato">
+              <option value="notas">notas</option>
+              <option value="texto">texto</option>
+              <option value="dictamen">dictamen (solo revisor)</option>
+            </select></label>
+        </div>
+        <label for="f-custom-entradas" class="fase-bloque">Entradas (bloques del estado que recibe)</label>
+        <div class="checks" id="f-custom-entradas"></div>
+        <label for="f-custom-instrucciones" class="fase-bloque">Instrucciones (prompt base del agente)</label>
+        <textarea id="f-custom-instrucciones" rows="3" placeholder="Eres el verificador de datos de {marca}. Revisa el capítulo y anota todo dato no verificable."></textarea>
+        <div class="acciones-form" style="margin:8px 0 0">
+          <button class="secundario" id="custom-add" type="button">Añadir agente custom</button>
+        </div>
+        <div id="lista-customs"></div>
+      </div>
     </details>
 
     <div id="editor-errores"></div>
@@ -457,6 +491,56 @@ const operaciones = {
 
 function alerta(mensaje) { alert(mensaje); }
 
+// ------------------------- agentes custom del editor -------------------------
+
+//: Catálogo de entradas (debe reflejar CATALOGO_ENTRADAS del registro).
+const ENTRADAS_CUSTOM = ['capitulo', 'guion', 'lore', 'plan', 'directivas'];
+let customsEditor = [];  // [{rol, tipo, contrato, entradas, instrucciones}]
+
+function pintarEntradasCustom() {
+  $('f-custom-entradas').innerHTML = ENTRADAS_CUSTOM.map(e =>
+    `<label><input type="checkbox" value="${e}" ${e === 'capitulo' ? 'checked' : ''}> ${e}</label>`
+  ).join('');
+}
+
+function pintarCustoms() {
+  const lista = $('lista-customs');
+  if (!customsEditor.length) { lista.innerHTML = ''; return; }
+  lista.innerHTML = customsEditor.map((c, i) => `
+    <div class="fila-custom" data-custom="${esc(c.rol)}">
+      <span class="badge">${esc(c.rol)}</span>
+      <small>${esc(c.tipo)} · contrato ${esc(c.contrato)} · entradas: ${esc(c.entradas.join(', '))}</small>
+      <button class="secundario" data-quitar-custom="${esc(c.rol)}" type="button">quitar</button>
+    </div>`).join('');
+  lista.querySelectorAll('[data-quitar-custom]').forEach(b => {
+    b.onclick = () => {
+      customsEditor = customsEditor.filter(c => c.rol !== b.dataset.quitarCustom);
+      pintarCustoms();
+    };
+  });
+}
+
+$('custom-add').onclick = () => {
+  const rol = valor('f-custom-rol').replace(/\s+/g, '_').toLowerCase();
+  const instrucciones = $('f-custom-instrucciones').value.trim();
+  if (!rol) { alerta('El agente custom necesita un rol.'); return; }
+  if (!instrucciones) { alerta('El agente custom necesita instrucciones.'); return; }
+  if (ROLES.some(r => r.rol === rol)) { alerta(`'${rol}' ya existe en el registro: usa un rol nuevo.`); return; }
+  if (customsEditor.some(c => c.rol === rol)) { alerta(`El rol custom '${rol}' ya está en la lista.`); return; }
+  const entradas = [...$('f-custom-entradas').querySelectorAll('input:checked')].map(x => x.value);
+  if (!entradas.length) { alerta('Marca al menos una entrada para el agente custom.'); return; }
+  customsEditor.push({
+    rol,
+    tipo: valor('f-custom-tipo'),
+    contrato: valor('f-custom-contrato'),
+    entradas,
+    instrucciones,
+  });
+  $('f-custom-rol').value = '';
+  $('f-custom-instrucciones').value = '';
+  pintarCustoms();
+};
+
 // ------------------------------ editor de proyecto -------------------------
 
 async function cargarRoles() {
@@ -567,6 +651,7 @@ function rango(a, b) {
 
 async function abrirEditor(id, duplicar) {
   await cargarRoles();
+  pintarEntradasCustom();
   editorEstado = { modo: duplicar ? 'crear' : (id ? 'editar' : 'crear'),
                    idOriginal: duplicar ? null : id };
   $('editor-errores').innerHTML = '';
@@ -615,6 +700,17 @@ async function abrirEditor(id, duplicar) {
     document.querySelector(`[data-ag="${r.rol}-temperatura"]`).value = cfg.temperatura ?? '';
     actualizarBadge(r.rol);
   }
+  // Agentes custom del proyecto: los roles de [agentes] que no están en ROLES.
+  customsEditor = Object.entries(ag)
+    .filter(([rol, cfg]) => cfg && cfg.tipo && !ROLES.some(r => r.rol === rol))
+    .map(([rol, cfg]) => ({
+      rol,
+      tipo: cfg.tipo,
+      contrato: cfg.contrato || 'notas',
+      entradas: cfg.entradas || [],
+      instrucciones: cfg.instrucciones || '',
+    }));
+  pintarCustoms();
   $('editor-agentes').querySelectorAll('[data-ag]').forEach(el =>
     el.addEventListener('change', () =>
       actualizarBadge(el.dataset.ag.replace(/-(activo|reglas|proveedor|modelo|temperatura)$/, ''))));
@@ -680,6 +776,17 @@ function formADatos() {
     if (Object.keys(cfg).length) agentes[r.rol] = cfg;
   }
   if (Object.keys(agentes).length) datos.agentes = agentes;
+  // Agentes custom del editor (un rol nuevo por sección [agentes.<rol>]).
+  for (const c of customsEditor) {
+    datos.agentes = datos.agentes || {};
+    datos.agentes[c.rol] = {
+      tipo: c.tipo,
+      contrato: c.contrato,
+      entradas: c.entradas,
+      instrucciones: c.instrucciones,
+    };
+  }
+  if (Object.keys(datos.agentes || {}).length === 0) delete datos.agentes;
   return datos;
 }
 

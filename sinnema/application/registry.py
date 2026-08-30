@@ -57,10 +57,12 @@ from sinnema.application.state import PipelineState
 from sinnema.domain.models import (
     AdaptedScript,
     ContinuityDirectives,
+    NotasDelAgente,
     QualityAudit,
     ScriptDraft,
     SeriesPlan,
     TechnicalPackage,
+    TextoLibre,
 )
 from sinnema.domain.services import (
     identity_adaptation,
@@ -109,6 +111,10 @@ class AgentDefinition:
     roles sin deactivación: esenciales y la compuerta, cuya política vive en
     el nodo estructural del grafo); ``actualizacion_extra`` aporta las claves
     de estado adicionales que el nodo devuelve junto al artefacto.
+
+    Un agente CUSTOM usa ``adjunto = True`` con ``produce = "artefactos"``:
+    el nodo lo empaqueta como ``{rol: artefacto}`` para que el reducer de la
+    pizarra lo fusione y el commit lo adjunte al episodio.
     """
 
     rol: str
@@ -126,6 +132,9 @@ class AgentDefinition:
     resumen: Optional[Resumen] = None
     esencial: bool = False
     descripcion: str = ""
+    #: True = el artefacto viaja como adjunto en la pizarra (agentes custom
+    #: de contexto/enriquecimiento), no en un slot canónico.
+    adjunto: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -199,11 +208,16 @@ def _mensaje_critic(project: ProjectSpec, state: PipelineState) -> str:
 
 def _mensaje_director(project: ProjectSpec, state: PipelineState) -> str:
     plan, capitulo, _ = capitulo_actual(state)
+    adaptado = state.get("adapted_script")
+    if adaptado is None:
+        # Flujo sin transformaciones aguas arriba: el director traduce el
+        # borrador con adaptación identidad (determinista, sin LLM).
+        adaptado = identity_adaptation(state["draft_script"])
     return director_prompts.build_user_message(
         project,
         chapter=capitulo,
         draft=state["draft_script"],
-        adapted=state["adapted_script"],
+        adapted=adaptado,
         recurring_elements=plan.recurring_elements,
     )
 
@@ -519,9 +533,181 @@ def build_role_system_prompts(spec: ProjectSpec) -> Dict[str, str]:
 
     Cada prompt base del rol se compone con el ``ProjectSpec`` y luego recibe
     las ``reglas`` declaradas en ``[agentes.<rol>]`` del proyecto, si las hay.
+    Incluye los agentes custom del proyecto (definidos 100% en el TOML).
     """
     prompts: Dict[str, str] = {}
-    for rol, definicion_rol in AGENT_REGISTRY.items():
+    for rol, definicion_rol in {**AGENT_REGISTRY, **definiciones_custom(spec)}.items():
         base = definicion_rol.prompts.build_system_prompt(spec)
         prompts[rol] = _con_reglas(base, spec.config_de_agente(rol))
     return prompts
+
+
+# ---------------------------------------------------------------------------
+# Agentes custom (declarados 100% en el TOML; spec-agentes-dinamicos §8)
+# ---------------------------------------------------------------------------
+
+#: Contratos genéricos de salida por nombre de ``contrato``. El dictamen es
+#: directamente ``QualityAudit``: la compuerta de calidad depende de esa
+#: semántica (aprobado / score / feedback) y no se negocia.
+CONTRATOS_GENERICOS: Dict[str, Type[BaseModel]] = {
+    "notas": NotasDelAgente,
+    "texto": TextoLibre,
+    "dictamen": QualityAudit,
+}
+
+
+def _bloque_capitulo(project: ProjectSpec, state: PipelineState) -> str:
+    try:
+        _, capitulo, _ = capitulo_actual(state)
+    except (KeyError, RuntimeError):
+        return "(no disponible: no hay capítulo en curso)"
+    return (
+        f"id: {capitulo.chapter_id}\n"
+        f"titulo: {capitulo.title}\n"
+        f"objetivo: {capitulo.learning_objective}\n"
+        f"conceptos_clave: {', '.join(capitulo.key_concepts)}\n"
+        f"dificultad: {capitulo.difficulty}"
+    )
+
+
+def _bloque_guion(project: ProjectSpec, state: PipelineState) -> str:
+    borrador = state.get("draft_script")
+    if borrador is None:
+        return "(aún no hay guion en esta fase del pipeline)"
+    from sinnema.application.prompts._render import format_draft_scenes
+
+    return (
+        f"titulo: {borrador.title}\n"
+        f"hook: {borrador.hook}\n"
+        f"escenas:\n{format_draft_scenes(borrador)}\n"
+        f"cta: {borrador.call_to_action}"
+    )
+
+
+def _bloque_lore(project: ProjectSpec, state: PipelineState) -> str:
+    from sinnema.application.prompts._render import format_lore
+
+    return format_lore(state.get("lore_entries", []))
+
+
+def _bloque_plan(project: ProjectSpec, state: PipelineState) -> str:
+    plan = state.get("series_plan")
+    if plan is None:
+        return "(no disponible: la serie aún no fue planificada)"
+    return (
+        f"titulo: {plan.series_title}\n"
+        f"promesa: {plan.series_promise}\n"
+        f"elementos_recurrentes: {'; '.join(plan.recurring_elements) or '(sin definir)'}"
+    )
+
+
+def _bloque_directivas(project: ProjectSpec, state: PipelineState) -> str:
+    directivas = state.get("continuity_directives")
+    if directivas is None:
+        return "(sin directivas de continuidad en esta corrida)"
+    return (
+        f"conceptos_ya_cubiertos: {', '.join(directivas.concepts_already_covered) or '(ninguno)'}\n"
+        f"callbacks_permitidos: {' | '.join(directivas.callbacks_allowed) or '(ninguno)'}\n"
+        f"prohibido_reexplicar: {', '.join(directivas.forbidden_reexplanations) or '(nada)'}\n"
+        f"terminos_nuevos: {', '.join(directivas.new_terms_to_introduce)}"
+    )
+
+
+#: Bloques del estado que un agente custom puede recibir en su mensaje
+#: (``entradas`` del TOML), con su extractor ``(project, state) -> str``.
+CATALOGO_ENTRADAS: Dict[str, Callable[[ProjectSpec, PipelineState], str]] = {
+    "capitulo": _bloque_capitulo,
+    "guion": _bloque_guion,
+    "lore": _bloque_lore,
+    "plan": _bloque_plan,
+    "directivas": _bloque_directivas,
+}
+
+
+def placeholders_del_spec(spec: ProjectSpec) -> Dict[str, str]:
+    """Valores para los placeholders ``{nombre}`` de instrucciones custom."""
+    return {
+        "marca": spec.brand_name,
+        "concepto": spec.show_concept,
+        "tema": spec.default_topic,
+        "idioma": spec.language,
+        "audiencia": spec.audience,
+        "tono": spec.tone_of_voice,
+        "contexto_cultural": spec.cultural_context,
+        "guia_de_estilo": spec.style_guide,
+        "restricciones": spec.constraints,
+        "estilo_maestro": spec.visual_master_style,
+    }
+
+
+class CustomPrompts:
+    """Adaptador de prompts para un agente custom.
+
+    Cumple el contrato ``PromptModule``: el system prompt son las
+    ``instrucciones`` del TOML con sus placeholders renderizados (las reglas
+    del proyecto se apendan después, igual que en los roles de código).
+    """
+
+    def __init__(self, instrucciones: str) -> None:
+        self._instrucciones = instrucciones
+
+    def build_system_prompt(self, spec: ProjectSpec) -> str:
+        return self._instrucciones.format_map(placeholders_del_spec(spec))
+
+    def build_user_message(self, *args: Any, **kwargs: Any) -> str:  # pragma: no cover
+        raise RuntimeError(
+            "Un agente custom construye su mensaje vía AgentDefinition.mensaje "
+            "(render de bloques), nunca vía el módulo de prompts."
+        )
+
+
+def _mensaje_custom(rol: str, entradas: Tuple[str, ...]) -> MensajeBuilder:
+    """Renderiza los bloques declarados en ``entradas`` como mensaje usuario."""
+
+    def _mensaje(project: ProjectSpec, state: PipelineState) -> str:
+        bloques = "\n".join(
+            f"<{nombre}>\n{CATALOGO_ENTRADAS[nombre](project, state)}\n</{nombre}>"
+            for nombre in entradas
+        )
+        return (
+            f"<encargo_para_{rol}>\n{bloques}\n</encargo_para_{rol}>\n\n"
+            "Responde EXCLUSIVAMENTE mediante el esquema estructurado."
+        )
+
+    return _mensaje
+
+
+def definiciones_custom(spec: ProjectSpec) -> Dict[str, AgentDefinition]:
+    """Sintetiza las ``AgentDefinition`` de los agentes custom del proyecto.
+
+    Un agente custom (``[agentes.<rol>]`` con ``tipo``) se convierte en una
+    definición equivalente a las de código: su nodo es su rol, su esquema es
+    el contrato genérico declarado y su mensaje renderiza los bloques de
+    ``entradas``. El revisor custom escribe el slot canónico ``qa_verdict``
+    (la compuerta depende de ello); los demás adjuntan a la pizarra.
+    """
+    definiciones: Dict[str, AgentDefinition] = {}
+    for rol, config in spec.agentes.items():
+        if not config.es_custom:
+            continue
+        es_revisor = config.tipo == "revisor"
+        definiciones[rol] = AgentDefinition(
+            rol=rol,
+            tipo=config.tipo,  # type: ignore[arg-type]  # validado en projects
+            esquema=CONTRATOS_GENERICOS[config.contrato or "notas"],
+            prompts=CustomPrompts(config.instrucciones or ""),
+            nodo=rol,
+            produce="qa_verdict" if es_revisor else "artefactos",
+            mensaje=_mensaje_custom(rol, config.entradas),
+            consume=tuple(config.entradas),
+            descripcion=(
+                f"Agente custom ({config.tipo}; contrato {config.contrato})"
+            ),
+            adjunto=not es_revisor,
+        )
+    return definiciones
+
+
+def definiciones_del_proyecto(spec: ProjectSpec) -> Dict[str, AgentDefinition]:
+    """Catálogo completo de un proyecto: registro global + customs del TOML."""
+    return {**AGENT_REGISTRY, **definiciones_custom(spec)}

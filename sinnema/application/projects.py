@@ -63,6 +63,103 @@ POLITICAS_DE_AGOTAMIENTO = {
 TEMPERATURA_MIN = 0.0
 TEMPERATURA_MAX = 2.0
 
+# --- Agentes custom (declarados 100% en el TOML; spec-agentes-dinamicos §8) ----
+#: Tipos permitidos para un agente custom: la compuerta (revisor) y las fases
+#: periféricas. ``escritor``/``transformador`` exigen contratos de guion
+#: tipados y se quedan en código.
+TIPOS_CUSTOM = ("contexto", "enriquecedor", "revisor")
+#: Contratos genéricos de salida; el revisor EXIGE el dictamen de dominio
+#: (``QualityAudit``): la compuerta depende de esa semántica.
+CONTRATO_REVISOR = "dictamen"
+CONTRATOS_POR_TIPO = {
+    "contexto": ("notas", "texto"),
+    "enriquecedor": ("notas", "texto"),
+    "revisor": (CONTRATO_REVISOR,),
+}
+CONTRATOS_VALIDOS = frozenset({"notas", "texto", CONTRATO_REVISOR})
+INSTRUCCIONES_MAX_CHARS = 2000
+
+#: Placeholders que ``instrucciones`` puede usar (se renderizan con el spec).
+PLACEHOLDERS_INSTRUCCIONES = frozenset(
+    {"marca", "concepto", "tema", "idioma", "audiencia", "tono",
+     "contexto_cultural", "guia_de_estilo", "restricciones", "estilo_maestro"}
+)
+_PLACEHOLDER_PATTERN = re.compile(r"\{([a-z_]+)\}")
+
+
+def _problemas_de_custom(rol: str, config: "AgentConfig") -> List[str]:
+    """Problemas de SEMÁNTICA de un agente custom (§9.7-10 de la spec).
+
+    La forma cruda (tipos/claves TOML) la valida ``_mapear_agentes``; aquí se
+    chequea la coherencia de la configuración ya parseada. El catálogo de
+    entradas vive en el registro (import diferido, mismo motivo que en
+    ``FlowSpec.validar``).
+    """
+    problemas: List[str] = []
+    assert config.tipo is not None  # solo se llama con customs
+
+    if not ROL_CUSTOM_PATTERN.match(rol) or len(rol) > ROL_CUSTOM_MAX_CHARS:
+        problemas.append(
+            f"el rol custom '{rol}' debe ser un slug de hasta "
+            f"{ROL_CUSTOM_MAX_CHARS} caracteres ([a-z0-9_], empieza con letra)."
+        )
+    if config.contrato is None:
+        problemas.append(
+            f"el agente custom '{rol}' exige 'contrato' "
+            f"({', '.join(sorted(CONTRATOS_VALIDOS))})."
+        )
+    elif config.contrato not in CONTRATOS_POR_TIPO[config.tipo]:
+        problemas.append(
+            f"el contrato '{config.contrato}' no es válido para un agente custom "
+            f"de tipo '{config.tipo}' (permitidos: "
+            f"{', '.join(CONTRATOS_POR_TIPO[config.tipo])}); un 'revisor' exige "
+            f"el contrato '{CONTRATO_REVISOR}' (la compuerta depende de esa "
+            "semántica)."
+        )
+    if config.instrucciones is None or not config.instrucciones.strip():
+        problemas.append(
+            f"el agente custom '{rol}' exige 'instrucciones': su prompt base "
+            "puede usar placeholders como {marca} o {audiencia}."
+        )
+    else:
+        if len(config.instrucciones) > INSTRUCCIONES_MAX_CHARS:
+            problemas.append(
+                f"'instrucciones' del agente custom '{rol}' no puede superar "
+                f"{INSTRUCCIONES_MAX_CHARS} caracteres "
+                f"(recibidos: {len(config.instrucciones)})."
+            )
+        desconocidos = sorted(
+            {
+                nombre
+                for nombre in _PLACEHOLDER_PATTERN.findall(config.instrucciones)
+                if nombre not in PLACEHOLDERS_INSTRUCCIONES
+            }
+        )
+        if desconocidos:
+            problemas.append(
+                f"'instrucciones' del agente custom '{rol}' usa placeholders "
+                f"desconocidos: {', '.join(desconocidos)} (válidos: "
+                f"{', '.join(sorted(PLACEHOLDERS_INSTRUCCIONES))})."
+            )
+    if not config.entradas:
+        problemas.append(
+            f"el agente custom '{rol}' exige 'entradas': los bloques del estado "
+            "que recibe en su mensaje (p. ej. [\"capitulo\", \"lore\"])."
+        )
+    else:
+        from sinnema.application.registry import CATALOGO_ENTRADAS
+
+        fuera_de_catalogo = [
+            entrada for entrada in config.entradas if entrada not in CATALOGO_ENTRADAS
+        ]
+        if fuera_de_catalogo:
+            problemas.append(
+                f"'entradas' del agente custom '{rol}' fuera del catálogo: "
+                f"{', '.join(fuera_de_catalogo)} "
+                f"(válidas: {', '.join(sorted(CATALOGO_ENTRADAS))})."
+            )
+    return problemas
+
 
 @dataclass(frozen=True)
 class AgentConfig:
@@ -71,6 +168,11 @@ class AgentConfig:
     Todo opcional y ``None``/vacío significa "usa el default global". Las
     ``reglas`` se apendan al final del prompt del sistema del rol; la
     precedencia de proveedor/modelo/temperatura es proyecto > entorno > default.
+
+    Un agente CUSTOM se declara con ``tipo`` (contexto | enriquecedor |
+    revisor): exige ``instrucciones`` (su prompt base), ``contrato`` (salida
+    genérica: notas | texto | dictamen) y ``entradas`` (bloques del estado que
+    recibe en el mensaje). Los roles del registro ignoran estos campos.
     """
 
     activo: bool = True
@@ -78,6 +180,11 @@ class AgentConfig:
     proveedor: Optional[str] = None
     modelo: Optional[str] = None
     temperatura: Optional[float] = None
+    #: La presencia de ``tipo`` convierte al rol en custom (fuera del registro).
+    tipo: Optional[str] = None
+    contrato: Optional[str] = None
+    entradas: Tuple[str, ...] = ()
+    instrucciones: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.temperatura is not None and not (
@@ -92,6 +199,10 @@ class AgentConfig:
             raise ValueError(
                 f"proveedor debe ser uno de: {validos} (recibido: '{self.proveedor}')."
             )
+
+    @property
+    def es_custom(self) -> bool:
+        return self.tipo is not None
 
 
 @dataclass(frozen=True)
@@ -150,11 +261,28 @@ class FlowSpec:
     declarado: bool = True
 
     def validar(self, agentes: Mapping[str, "AgentConfig"]) -> List[str]:
-        """Devuelve TODOS los problemas de composición y alcance del flujo."""
+        """Devuelve TODOS los problemas de composición y alcance del flujo.
+
+        Acepta roles custom: los ``[agentes.<rol>]`` que declaran ``tipo``
+        son roles conocidos con ese tipo (la validez de su configuración la
+        chequea ``ProjectSpec.validate``).
+        """
         problemas: List[str] = []
         # Import diferido: el registro importa este módulo (ciclo registry ->
         # prompts -> projects); en tiempo de llamada ya está construido.
         from sinnema.application.registry import AGENT_REGISTRY
+
+        tipos_extra = {
+            rol: config.tipo
+            for rol, config in agentes.items()
+            if config.es_custom
+        }
+
+        def _tipo_de(rol: str) -> Optional[str]:
+            definicion = AGENT_REGISTRY.get(rol)
+            if definicion is not None:
+                return definicion.tipo
+            return tipos_extra.get(rol)
 
         fases = (
             ("contexto", "contexto", self.contexto),
@@ -164,11 +292,12 @@ class FlowSpec:
         listados: List[str] = []
         for fase, tipo, roles in fases:
             for rol in roles:
-                definicion = AGENT_REGISTRY.get(rol)
-                if definicion is None:
+                tipo_rol = _tipo_de(rol)
+                if tipo_rol is None:
                     problemas.append(
                         f"rol desconocido '{rol}' en '{fase}' de [flujo] "
-                        f"(roles del registro: {', '.join(sorted(AGENT_REGISTRY))})."
+                        f"(roles del registro: {', '.join(sorted(AGENT_REGISTRY))}; "
+                        "o decláralo como custom en [agentes.<rol>] con su 'tipo')."
                     )
                     continue
                 if rol in ROLES_ESENCIALES:
@@ -177,9 +306,9 @@ class FlowSpec:
                         "siempre participa del pipeline."
                     )
                     continue
-                if definicion.tipo != tipo:
+                if tipo_rol != tipo:
                     problemas.append(
-                        f"el rol '{rol}' es de tipo '{definicion.tipo}' y no puede "
+                        f"el rol '{rol}' es de tipo '{tipo_rol}' y no puede "
                         f"ir en la fase '{fase}' de [flujo]."
                     )
                 if rol in listados:
@@ -189,20 +318,21 @@ class FlowSpec:
                     )
                 listados.append(rol)
         if self.revisor is not None:
-            definicion = AGENT_REGISTRY.get(self.revisor)
-            if definicion is None:
+            tipo_revisor = _tipo_de(self.revisor)
+            if tipo_revisor is None:
                 problemas.append(
                     f"rol desconocido '{self.revisor}' en 'revisor' de [flujo] "
-                    f"(roles del registro: {', '.join(sorted(AGENT_REGISTRY))})."
+                    f"(roles del registro: {', '.join(sorted(AGENT_REGISTRY))}; "
+                    "o decláralo como custom en [agentes.<rol>] con su 'tipo')."
                 )
             elif self.revisor in ROLES_ESENCIALES:
                 problemas.append(
                     f"el rol '{self.revisor}' es estructural y no se lista en "
                     "[flujo]: siempre participa del pipeline."
                 )
-            elif definicion.tipo != "revisor":
+            elif tipo_revisor != "revisor":
                 problemas.append(
-                    f"el rol '{self.revisor}' es de tipo '{definicion.tipo}' y no "
+                    f"el rol '{self.revisor}' es de tipo '{tipo_revisor}' y no "
                     "puede hacer de 'revisor' en [flujo]."
                 )
             elif self.revisor in listados:
@@ -427,6 +557,27 @@ class ProjectSpec:
                     "pipeline (sin él no hay serie)."
                 )
 
+        # Agentes custom: semántica de tipo/contrato/instrucciones/entradas
+        # (§9.7-10 de la spec) y su participación en el flujo declarado.
+        customs = {rol: cfg for rol, cfg in self.agentes.items() if cfg.es_custom}
+        for rol, config in sorted(customs.items()):
+            problemas.extend(_problemas_de_custom(rol, config))
+        if customs and self.flujo is None:
+            problemas.append(
+                "hay agentes custom declarados en [agentes] pero el proyecto no "
+                "declara [flujo]: un agente custom solo corre listado en un "
+                "[flujo] (añade la sección o conviértelo en agente de código)."
+            )
+        if customs and self.flujo is not None:
+            listados = set(self.flujo.roles_completos())
+            for rol in sorted(customs):
+                if rol not in listados:
+                    problemas.append(
+                        f"el agente custom '{rol}' no está listado en [flujo]: "
+                        "un agente que no participa no tiene efecto (añádelo a "
+                        "una fase o elimina su sección)."
+                    )
+
         if self.flujo is not None:
             problemas.extend(self.flujo.validar(self.agentes))
 
@@ -492,15 +643,23 @@ def _mapear_seccion(
     return {claves[k]: v for k, v in contenido.items() if k in claves}
 
 
-_CLAVES_AGENTE = frozenset({"activo", "reglas", "proveedor", "modelo", "temperatura"})
-_CLAVES_PIPELINE = frozenset({"intentos_maximos_de_critica", "politica_al_agotar"})
-_CLAVES_FLUJO = frozenset(
-    {"contexto", "transformaciones", "revisor", "enriquecimiento", "hasta"}
+_CLAVES_AGENTE = frozenset(
+    {"activo", "reglas", "proveedor", "modelo", "temperatura",
+     "tipo", "contrato", "entradas", "instrucciones"}
 )
+
+#: Un rol custom es un slug nuevo (nombra su nodo del grafo y el sufijo de
+#: sus variables de entorno LLM_PROVIDER_<ROL>).
+ROL_CUSTOM_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
+ROL_CUSTOM_MAX_CHARS = 30
 
 
 def _mapear_agentes(datos: Dict[str, Any], problemas: List[str]) -> Dict[str, AgentConfig]:
-    """Parsea ``[agentes.<rol>]`` acumulando todos los problemas de una vez."""
+    """Parsea ``[agentes.<rol>]`` acumulando todos los problemas de una vez.
+
+    Acepta los roles del registro y, además, roles CUSTOM: un rol fuera del
+    registro es válido si declara ``tipo`` (ver ``AgentConfig``).
+    """
     crudo = datos.get("agentes")
     if crudo is None:
         return {}
@@ -511,11 +670,14 @@ def _mapear_agentes(datos: Dict[str, Any], problemas: List[str]) -> Dict[str, Ag
     configs: Dict[str, AgentConfig] = {}
     for rol, cfg in crudo.items():
         if rol not in ROLES_CONFIGURABLES:
-            problemas.append(
-                f"[agentes.{rol}] no es un rol configurable "
-                f"(válidos: {', '.join(ROLES_CONFIGURABLES)})."
-            )
-            continue
+            es_candidato_custom = isinstance(cfg, dict) and "tipo" in cfg
+            if not es_candidato_custom:
+                problemas.append(
+                    f"[agentes.{rol}] no es un rol configurable "
+                    f"(válidos: {', '.join(ROLES_CONFIGURABLES)}; para un agente "
+                    "custom declara su 'tipo')."
+                )
+                continue
         if not isinstance(cfg, dict):
             problemas.append(f"[agentes.{rol}] debe ser una tabla TOML")
             continue
@@ -557,6 +719,46 @@ def _mapear_agentes(datos: Dict[str, Any], problemas: List[str]) -> Dict[str, Ag
             problemas.append(f"'temperatura' en [agentes.{rol}] debe ser numérica.")
             temperatura = None
 
+        # --- Agentes custom: forma de tipo/contrato/entradas/instrucciones ---
+        tipo = cfg.get("tipo")
+        if tipo is not None:
+            if not isinstance(tipo, str) or tipo not in TIPOS_CUSTOM:
+                problemas.append(
+                    f"'tipo' en [agentes.{rol}] debe ser uno de: "
+                    f"{', '.join(TIPOS_CUSTOM)} (recibido: '{tipo}')."
+                )
+                tipo = None
+            elif rol in ROLES_CONFIGURABLES:
+                problemas.append(
+                    f"[agentes.{rol}] declara 'tipo' pero ya existe en el "
+                    "registro: los agentes custom usan un rol nuevo."
+                )
+                tipo = None
+        contrato = cfg.get("contrato")
+        if contrato is not None and (
+            not isinstance(contrato, str) or contrato not in CONTRATOS_VALIDOS
+        ):
+            problemas.append(
+                f"'contrato' en [agentes.{rol}] debe ser uno de: "
+                f"{', '.join(sorted(CONTRATOS_VALIDOS))} (recibido: '{contrato}')."
+            )
+            contrato = None
+        entradas_crudas = cfg.get("entradas", [])
+        if not isinstance(entradas_crudas, list) or not all(
+            isinstance(e, str) for e in entradas_crudas
+        ):
+            problemas.append(
+                f"'entradas' en [agentes.{rol}] debe ser una lista de textos."
+            )
+            entradas_crudas = []
+        entradas = tuple(e.strip() for e in entradas_crudas if e and e.strip())
+        instrucciones = cfg.get("instrucciones")
+        if instrucciones is not None and not isinstance(instrucciones, str):
+            problemas.append(
+                f"'instrucciones' en [agentes.{rol}] debe ser texto."
+            )
+            instrucciones = None
+
         try:
             configs[rol] = AgentConfig(
                 activo=activo,
@@ -564,10 +766,20 @@ def _mapear_agentes(datos: Dict[str, Any], problemas: List[str]) -> Dict[str, Ag
                 proveedor=proveedor.strip().lower() if proveedor else None,
                 modelo=modelo.strip() if modelo else None,
                 temperatura=float(temperatura) if temperatura is not None else None,
+                tipo=tipo,
+                contrato=contrato,
+                entradas=entradas,
+                instrucciones=instrucciones,
             )
         except ValueError as exc:
             problemas.append(f"[agentes.{rol}] inválido: {exc}")
     return configs
+_CLAVES_PIPELINE = frozenset({"intentos_maximos_de_critica", "politica_al_agotar"})
+_CLAVES_FLUJO = frozenset(
+    {"contexto", "transformaciones", "revisor", "enriquecimiento", "hasta"}
+)
+
+
 
 
 def _mapear_pipeline(datos: Dict[str, Any], problemas: List[str]) -> PipelineConfig:
