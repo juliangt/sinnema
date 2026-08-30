@@ -9,6 +9,7 @@ Expone el caso de uso existente como producto distribuible:
 - ``GET  /api/projects``             los shows disponibles,
 - ``POST/PUT/DELETE /api/projects``  gestión de proyectos vía archivos TOML,
 - ``GET  /api/projects/{id}/prompts`` vista previa de prompts compuestos,
+- ``GET  /api/projects/{id}/flujo-efectivo`` fases resueltas + hito + Mermaid,
 - ``GET/DELETE /api/projects/{id}/lore`` memoria de continuidad,
 - ``GET  /api/meta/roles``           catálogo de agentes para el formulario,
 - ``GET  /``                         la interfaz web (gestión + generación).
@@ -38,9 +39,13 @@ from fastapi.responses import (
 )
 from pydantic import BaseModel, Field
 
-from sinnema.application.projects import ROLES_ESENCIALES
+from sinnema.application.graph import build_pipeline_graph
+from sinnema.application.ports import ROLE_PLANNER, ROLE_SCRIPTWRITER
+from sinnema.application.projects import ROLES_ESENCIALES, resolver_flujo
 from sinnema.application.prompts import build_role_system_prompts
+from sinnema.application.registry import AGENT_REGISTRY
 from sinnema.application.requests import MAX_CRITIQUE_ATTEMPTS_LIMIT
+from sinnema.application.use_cases import limite_de_recursion
 from sinnema.domain.constants import SERIES_MAX_CHAPTERS
 from sinnema.infrastructure.api.viewer import render_deliverable_html
 from sinnema.infrastructure.llm.providers import DEFAULT_ROLE_SPECS
@@ -204,6 +209,39 @@ def create_app(
         proyecto = _proyecto_o_404(project_id)
         return build_role_system_prompts(proyecto)
 
+    @app.get("/api/projects/{project_id}/flujo-efectivo")
+    def project_flujo_efectivo(project_id: str) -> dict:
+        """Fases resueltas del proyecto, hito, límite de recursión y Mermaid.
+
+        Compila el grafo efectivo con un gateway nulo (nunca genera contenido)
+        para obtener el diagrama Mermaid, como el modo diagrama de
+        ``scripts/ver_grafo.py``. El límite de recursión se estima con los
+        defaults de corrida (3 capítulos, 2 reintentos de crítica).
+        """
+        proyecto = _proyecto_o_404(project_id)
+        flujo = resolver_flujo(proyecto)
+
+        class _GatewayNulo:  # el diagrama nunca genera contenido
+            def generate(self, *_a, **_k):  # pragma: no cover
+                raise RuntimeError("El diagrama del grafo no ejecuta el pipeline.")
+
+        grafo = build_pipeline_graph(_GatewayNulo(), proyecto)
+        return {
+            "project_id": proyecto.project_id,
+            "declarado": flujo.declarado,
+            "hasta": flujo.hasta,
+            "fases": {
+                "serie": [ROLE_PLANNER],
+                "contexto": list(flujo.contexto),
+                "escritor": [ROLE_SCRIPTWRITER],
+                "transformaciones": list(flujo.transformaciones),
+                "revisor": flujo.revisor,
+                "enriquecimiento": list(flujo.enriquecimiento),
+            },
+            "limite_recursion": limite_de_recursion(flujo, 3, 2),
+            "mermaid": grafo.get_graph().draw_mermaid(),
+        }
+
     @app.get("/api/projects/{project_id}/lore")
     def project_lore(project_id: str) -> list[dict]:
         _proyecto_o_404(project_id)
@@ -221,16 +259,27 @@ def create_app(
 
     @app.get("/api/meta/roles")
     def meta_roles() -> list[dict]:
-        return [
-            {
-                "rol": s.role,
-                "desactivable": s.role not in ROLES_ESENCIALES,
-                "proveedor": s.provider,
-                "modelo": s.model,
-                "temperatura": s.temperature,
+        """Catálogo de agentes desde el registro (rol, tipo, descripción,
+        esencial) con los defaults LLM de ``DEFAULT_ROLE_SPECS``."""
+        defaults = {s.role: s for s in DEFAULT_ROLE_SPECS}
+        respuesta = []
+        for rol, definicion in AGENT_REGISTRY.items():
+            item = {
+                "rol": rol,
+                "tipo": definicion.tipo,
+                "descripcion": definicion.descripcion,
+                "esencial": definicion.esencial,
+                "desactivable": rol not in ROLES_ESENCIALES,
             }
-            for s in DEFAULT_ROLE_SPECS
-        ]
+            default = defaults.get(rol)
+            if default is not None:
+                item.update(
+                    proveedor=default.provider,
+                    modelo=default.model,
+                    temperatura=default.temperature,
+                )
+            respuesta.append(item)
+        return respuesta
 
     @app.post("/api/series", status_code=202)
     def create_series(cuerpo: SeriesRequestBody, x_owner: Optional[str] = Header(None)) -> dict:

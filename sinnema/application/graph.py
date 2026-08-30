@@ -413,6 +413,7 @@ def build_pipeline_graph(
 
     if flujo.hasta == "plan":
         # Sin bucle de capítulos: planificar la serie y consolidar el outline.
+        workflow.add_edge(START, "plan_series")
         workflow.add_node("consolidar_plan", _consolidar_plan)
         workflow.add_edge("plan_series", "consolidar_plan")
         workflow.add_edge("consolidar_plan", END)

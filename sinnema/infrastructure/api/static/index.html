@@ -69,6 +69,13 @@ details { border:1px solid var(--line); border-radius:10px; padding:10px 14px;
 details summary { cursor:pointer; font-weight:600; font-size:.9rem; color:var(--tx); }
 details[open] summary { margin-bottom:6px; }
 .hint { font-size:.78rem; color:var(--tx2); margin-top:4px; }
+/* Flujo en editor */
+.checks { display:flex; flex-wrap:wrap; gap:6px 18px; }
+.checks label { display:flex; align-items:center; gap:6px; margin:0;
+                font-size:.85rem; color:var(--tx); }
+.fase-bloque { margin:12px 0 4px; }
+.fase-bloque h4 { font-size:.75rem; color:var(--tx2); text-transform:uppercase;
+                  letter-spacing:.05em; margin-bottom:6px; }
 .errores { background:#2a1616; border:1px solid var(--err); color:var(--err);
            border-radius:10px; padding:12px 16px; margin-top:14px; font-size:.85rem; }
 .errores ul { margin:6px 0 0 18px; }
@@ -202,6 +209,32 @@ listas para producción. Todo vive en archivos TOML: la web los lee y los escrib
       </div>
     </details>
 
+    <details><summary>Flujo <small>(opcional: qué agentes participan y hasta dónde llega)</small></summary>
+      <label for="f-hasta">Alcance (hasta) <small>último hito del pipeline que alcanza este show</small></label>
+      <select id="f-hasta"></select>
+      <p class="hint" id="f-hasta-descripcion"></p>
+      <div class="fase-bloque">
+        <h4>Contexto <span style="text-transform:none">(notas y directivas que informan al escritor)</span></h4>
+        <div class="checks" id="f-fase-contexto"></div>
+      </div>
+      <div class="fase-bloque">
+        <h4>Transformaciones <span style="text-transform:none">(reescriben el guion tras el escritor)</span></h4>
+        <div class="checks" id="f-fase-transformaciones"></div>
+      </div>
+      <div class="fase-bloque">
+        <h4>Revisor <span style="text-transform:none">(compuerta de calidad; vacío = aprobación directa)</span></h4>
+        <select id="f-revisor"></select>
+      </div>
+      <div class="fase-bloque">
+        <h4>Enriquecimiento <span style="text-transform:none">(adjuntos post-aprobación: specs, assets)</span></h4>
+        <div class="checks" id="f-fase-enriquecimiento"></div>
+      </div>
+      <p class="hint">Con <code>[flujo]</code> declarado, la lista manda: los roles marcados son
+        los únicos que corren (el planificador y el guionista son estructurales y siempre participan).
+        Sin marcar nada, el proyecto usa el pipeline completo por defecto y los interruptores por
+        agente (sección Agentes) deciden quién se cortocircuita.</p>
+    </details>
+
     <details><summary>Agentes <small>(reglas y comportamiento por rol)</small></summary>
       <p class="hint">Las reglas se agregan al final del prompt del sistema del agente.
         Proveedor/modelo/temperatura sobreescriben los defaults (precedencia:
@@ -223,6 +256,7 @@ listas para producción. Todo vive en archivos TOML: la web los lee y los escrib
   <div class="card" id="formulario">
     <label for="proyecto">Show (proyecto)</label>
     <select id="proyecto"></select>
+    <p class="hint" id="alcance-info"></p>
 
     <label for="tema">Tema de la serie <span style="opacity:.6">(vacío = tema por defecto del show)</span></label>
     <textarea id="tema" rows="2" placeholder="Ej: Fotosíntesis en 60 segundos"></textarea>
@@ -272,6 +306,32 @@ const esc = t => String(t ?? '').replace(/[&<>"']/g,
 let proyectosCache = [];
 let ROLES = [];
 let editorEstado = { modo: 'crear', idOriginal: null };
+
+// Hitos del pipeline ([flujo].hasta): etiqueta corta y descripción (spec §5).
+const HITOS = {
+  plan: {
+    etiqueta: 'plan — solo el outline',
+    descripcion: 'Solo corre el planificador: entrega el plan de serie (capítulos y curva) sin gastar en guiones. Ideal para validar una idea.',
+  },
+  guion: {
+    etiqueta: 'guion — borradores',
+    descripcion: 'Contextos + escritor: borradores por capítulo, sin reescrituras ni specs de video.',
+  },
+  guion_final: {
+    etiqueta: 'guion final — listo para producir, sin video',
+    descripcion: 'Añade las transformaciones: guion final por capítulo sin specs de video ni prompt de imagen.',
+  },
+  auditado: {
+    etiqueta: 'auditado — con dictamen de calidad',
+    descripcion: 'Añade el revisor: guion final + dictamen/score por capítulo, sin paquete de producción. Exige declarar revisor.',
+  },
+  produccion: {
+    etiqueta: 'producción — paquete completo (default)',
+    descripcion: 'Pipeline completo: añade los enriquecedores con los prompts finales de imagen/video. Es el comportamiento por defecto.',
+  },
+};
+const ETIQUETAS_ALCANCE = { plan: 'plan', guion: 'guion', guion_final: 'guion final',
+                            auditado: 'auditado', produccion: 'producción' };
 
 // ------------------------------ vistas / tabs ------------------------------
 
@@ -323,6 +383,7 @@ async function listarProyectos() {
       <div class="ops">
         <button class="secundario" data-op="editar" data-id="${esc(p.project_id)}">Editar</button>
         <button class="secundario" data-op="duplicar" data-id="${esc(p.project_id)}">Duplicar</button>
+        <button class="secundario" data-op="grafo" data-id="${esc(p.project_id)}">Ver grafo</button>
         <button class="secundario" data-op="prompts" data-id="${esc(p.project_id)}">Ver prompts</button>
         <button class="secundario" data-op="lore" data-id="${esc(p.project_id)}">Lore</button>
         <button class="peligro" data-op="borrar" data-id="${esc(p.project_id)}" ${p.editable ? '' : 'disabled'}>Eliminar</button>
@@ -336,6 +397,27 @@ async function listarProyectos() {
 const operaciones = {
   async editar(id) { await abrirEditor(id, false); },
   async duplicar(id) { await abrirEditor(id, true); },
+  async grafo(id) {
+    try {
+      const f = await api(`/api/projects/${id}/flujo-efectivo`);
+      const roles = Object.entries(f.fases)
+        .map(([fase, lista]) => {
+          const nombres = Array.isArray(lista) ? lista : (lista ? [lista] : []);
+          return nombres.length ? `${fase}: ${nombres.join(' → ')}` : null;
+        })
+        .filter(Boolean).join(' · ');
+      const cuerpo = `
+        <p class="hint" style="margin-bottom:10px">Hito (hasta): <b>${esc(ETIQUETAS_ALCANCE[f.hasta] || f.hasta)}</b>
+        · ${f.declarado ? 'flujo declarado en [flujo]' : 'sin [flujo]: pipeline por defecto'}<br>
+        ${esc(roles)}<br>
+        Límite de recursión estimado (3 capítulos, 2 reintentos): <b>${f.limite_recursion}</b> pasos.</p>
+        <pre>${esc(f.mermaid)}</pre>
+        <p class="hint">Copiá el bloque y pegalo en
+        <a href="https://mermaid.live" target="_blank" rel="noopener">mermaid.live</a>
+        para ver el grafo dibujado.</p>`;
+      mostrarOverlay(`Grafo efectivo · ${esc(id)}`, cuerpo);
+    } catch (e) { alerta(e.message); }
+  },
   async prompts(id) {
     try {
       const prompts = await api(`/api/projects/${id}/prompts`);
@@ -387,7 +469,7 @@ async function cargarRoles() {
         <input type="checkbox" data-ag="${esc(r.rol)}-activo" ${r.desactivable ? '' : 'disabled'}>
         Activo ${r.desactivable ? '' : '<small>(rol estructural: no se puede desactivar)</small>'}
       </label>
-      <p class="hint">Default: ${esc(r.proveedor)} / ${esc(r.modelo)} (temp ${r.temperatura}).</p>
+      <p class="hint">${esc(r.descripcion || '')} Default: ${esc(r.proveedor)} / ${esc(r.modelo)} (temp ${r.temperatura}).</p>
       <label>Reglas <small>(una por línea, se agregan al prompt del sistema)</small></label>
       <textarea data-ag="${esc(r.rol)}-reglas" rows="3"></textarea>
       <div class="row">
@@ -403,6 +485,76 @@ async function cargarRoles() {
           <input data-ag="${esc(r.rol)}-temperatura" type="number" min="0" max="2" step="0.1" placeholder="(default)"></div>
       </div>
     </details>`).join('');
+  construirEditorFlujo();
+}
+
+// ------------------------------ editor de flujo ------------------------------
+
+function construirEditorFlujo() {
+  // Selector de alcance con descripción del hito elegido.
+  $('f-hasta').innerHTML =
+    '<option value="">(sin declarar flujo: pipeline completo por defecto)</option>' +
+    Object.entries(HITOS).map(([hito, d]) =>
+      `<option value="${esc(hito)}">${esc(d.etiqueta)}</option>`).join('');
+  const pintarHito = () => {
+    const d = HITOS[$('f-hasta').value];
+    $('f-hasta-descripcion').textContent = d ? d.descripcion : '';
+  };
+  $('f-hasta').onchange = pintarHito;
+  pintarHito();
+
+  // Roles disponibles por fase desde el registro (sin 'serie' ni 'escritor').
+  const POR_FASE = { contexto: 'contexto', transformaciones: 'transformador',
+                     enriquecimiento: 'enriquecedor' };
+  for (const [fase, tipo] of Object.entries(POR_FASE)) {
+    $(`f-fase-${fase}`).innerHTML = ROLES
+      .filter(r => r.tipo === tipo)
+      .map(r => `<label><input type="checkbox" data-fase="${esc(fase)}"
+        data-rol="${esc(r.rol)}"> ${esc(r.rol)}
+        <small style="opacity:.6">${esc(r.descripcion || '')}</small></label>`)
+      .join('') || '<span class="hint">Sin roles de este tipo en el registro.</span>';
+  }
+  // Revisor: selección única entre los roles de tipo 'revisor'.
+  $('f-revisor').innerHTML = '<option value="">(sin revisor: aprobación directa)</option>' +
+    ROLES.filter(r => r.tipo === 'revisor')
+      .map(r => `<option value="${esc(r.rol)}">${esc(r.rol)} — ${esc(r.descripcion || '')}</option>`)
+      .join('');
+}
+
+function cargarFlujoEnEditor(flujo) {
+  const f = flujo || {};
+  $('f-hasta').value = f.hasta || '';
+  $('f-hasta').onchange();
+  $('f-revisor').value = f.revisor || '';
+  document.querySelectorAll('#f-fase-contexto input, #f-fase-transformaciones input, #f-fase-enriquecimiento input')
+    .forEach(i => { i.checked = false; });
+  for (const fase of ['contexto', 'transformaciones', 'enriquecimiento']) {
+    for (const rol of (f[fase] || [])) {
+      const casilla = document.querySelector(
+        `input[data-fase="${fase}"][data-rol="${rol}"]`);
+      if (casilla) casilla.checked = true;
+    }
+  }
+}
+
+function flujoDesdeEditor() {
+  const hasta = valor('f-hasta');
+  const revisor = valor('f-revisor');
+  const fases = {};
+  for (const fase of ['contexto', 'transformaciones', 'enriquecimiento']) {
+    const roles = [...document.querySelectorAll(`input[data-fase="${fase}"]:checked`)]
+      .map(i => i.dataset.rol);
+    if (roles.length) fases[fase] = roles;
+  }
+  // Sin nada marcado ni hito elegido: el proyecto no declara [flujo] (legacy).
+  if (!Object.keys(fases).length && !revisor && !hasta) return null;
+  const flujo = {};
+  if (fases.contexto) flujo.contexto = fases.contexto;
+  if (fases.transformaciones) flujo.transformaciones = fases.transformaciones;
+  if (revisor) flujo.revisor = revisor;
+  if (fases.enriquecimiento) flujo.enriquecimiento = fases.enriquecimiento;
+  flujo.hasta = hasta || 'produccion';
+  return flujo;
 }
 
 function valor(id) { return $(id).value.trim(); }

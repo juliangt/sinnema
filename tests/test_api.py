@@ -345,6 +345,84 @@ def test_meta_roles_marca_los_estructurales(gestion):
     assert roles["critic"]["proveedor"] == "anthropic"
 
 
+def test_meta_roles_expone_tipo_descripcion_y_esencial_del_registro(gestion):
+    client, _, _, _ = gestion
+    roles = {r["rol"]: r for r in client.get("/api/meta/roles").json()}
+    assert roles["scriptwriter"]["tipo"] == "escritor"
+    assert roles["scriptwriter"]["esencial"] is True
+    assert roles["adapter"]["tipo"] == "transformador"
+    assert roles["adapter"]["esencial"] is False
+    assert roles["critic"]["tipo"] == "revisor"
+    assert roles["continuity"]["tipo"] == "contexto"
+    assert roles["technical_director"]["tipo"] == "enriquecedor"
+    assert roles["planner"]["tipo"] == "serie"
+    for rol, datos in roles.items():
+        assert datos["descripcion"], rol
+
+
+def test_flujo_efectivo_del_proyecto_por_defecto(cliente):
+    client, _ = cliente
+    res = client.get("/api/projects/educativo/flujo-efectivo")
+    assert res.status_code == 200
+    cuerpo = res.json()
+    assert cuerpo["project_id"] == "educativo"
+    assert cuerpo["declarado"] is False  # sin [flujo]: semántica legacy
+    assert cuerpo["hasta"] == "produccion"
+    assert cuerpo["fases"]["contexto"] == ["continuity"]
+    assert cuerpo["fases"]["revisor"] == "critic"
+    assert cuerpo["fases"]["enriquecimiento"] == ["technical_director"]
+    assert "technical_director" in cuerpo["mermaid"]
+    assert cuerpo["limite_recursion"] > 0
+
+
+def test_flujo_efectivo_con_flujo_declarado_y_truncado(gestion):
+    client, _, _, _ = gestion
+    client.post("/api/projects", json=_proyecto_json(flujo={
+        "contexto": ["continuity"],
+        "transformaciones": ["adapter"],
+        "revisor": "critic",
+        "enriquecimiento": ["technical_director"],
+        "hasta": "guion_final",  # trunca: compuerta y enriquecedores no corren
+    }))
+    res = client.get("/api/projects/mi-show/flujo-efectivo")
+    assert res.status_code == 200
+    cuerpo = res.json()
+    assert cuerpo["declarado"] is True
+    assert cuerpo["hasta"] == "guion_final"
+    assert cuerpo["fases"]["transformaciones"] == ["adapter"]
+    assert cuerpo["fases"]["revisor"] is None
+    assert cuerpo["fases"]["enriquecimiento"] == []
+    assert "persona_adapter" in cuerpo["mermaid"]
+    assert "chief_critic" not in cuerpo["mermaid"]
+
+
+def test_flujo_efectivo_de_proyecto_inexistente_es_404(cliente):
+    client, _ = cliente
+    assert client.get("/api/projects/no-existe/flujo-efectivo").status_code == 404
+
+
+def test_crear_proyecto_con_flujo_invalido_reporta_problemas(gestion):
+    client, _, _, _ = gestion
+    res = client.post("/api/projects", json=_proyecto_json(flujo={
+        "hasta": "auditado",  # sin revisor: error accionable
+    }))
+    assert res.status_code == 400
+    assert "revisor" in str(res.json())
+
+
+def test_crear_proyecto_con_flujo_valido_persiste_el_flujo(gestion):
+    client, _, _, _ = gestion
+    res = client.post("/api/projects", json=_proyecto_json(flujo={
+        "contexto": ["continuity"],
+        "revisor": "critic",
+        "hasta": "auditado",
+    }))
+    assert res.status_code in (201, 200)
+    crudo = client.get("/api/projects/mi-show").json()
+    assert crudo["flujo"]["hasta"] == "auditado"
+    assert crudo["flujo"]["revisor"] == "critic"
+
+
 def test_jobs_filtrados_por_proyecto(gestion):
     client, store, pstore, _ = gestion
     client.post("/api/projects", json=_proyecto_json())
