@@ -20,12 +20,18 @@ class WorkerDePrueba:
     def __init__(self, tmp_path):
         self.store = SqliteJobStore(tmp_path / "jobs.sqlite")
         self.gateway = gateway_con_serie(num_chapters=2)
+        self.proyectos_recibidos = []
+
+        def fabrica(proyecto):
+            self.proyectos_recibidos.append(proyecto)
+            return self.gateway
+
         self.worker = SeriesWorker(
             self.store,
             checkpoint_dir=tmp_path / "checkpoints",
             audit_root=tmp_path / "auditoria",
             lore_root=tmp_path / "continuidad",
-            gateway_factory=lambda: self.gateway,
+            gateway_factory=fabrica,
         )
         self.worker.start()
 
@@ -69,16 +75,23 @@ def test_job_publica_eventos_de_progreso(worker):
 
 
 def test_job_fallido_reporta_error_accionable(worker):
-    def gateway_roto():
+    def gateway_roto(proyecto):
         raise RuntimeError("No hay proveedor LLM: configurá ANTHROPIC_API_KEY.")
 
     worker.worker._gateway_factory = gateway_roto
-    worker.worker._gateway = None
     job = worker.correr(owner="ana", project_id="educativo",
                         topic="Fotosíntesis en 60 segundos",
                         num_chapters=1, max_critique_attempts=1)
     assert job.status is JobStatus.FAILED
     assert "ANTHROPIC_API_KEY" in job.error
+
+
+def test_la_fabrica_de_gateway_recibe_el_proyecto_del_job(worker):
+    job = worker.correr(owner="ana", project_id="educativo",
+                        topic="Fotosíntesis en 60 segundos",
+                        num_chapters=2, max_critique_attempts=2)
+    assert job.status is JobStatus.COMPLETED
+    assert worker.proyectos_recibidos[-1].project_id == "educativo"
 
 
 def test_proyecto_inexistente_falla_con_mensaje(worker):

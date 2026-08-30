@@ -1,6 +1,8 @@
 """Prompts del PERSONA & AUDIENCE ADAPTER por proyecto."""
 from __future__ import annotations
 
+from typing import Optional
+
 from sinnema.application.projects import ProjectSpec
 from sinnema.application.prompts._render import format_draft_scenes
 from sinnema.domain.models import ContinuityDirectives, ScriptDraft
@@ -43,8 +45,13 @@ Responde EXCLUSIVAMENTE mediante el esquema estructurado."""
 def build_user_message(
     spec: ProjectSpec,
     draft: ScriptDraft,
-    directives: ContinuityDirectives,
+    directives: Optional[ContinuityDirectives],
 ) -> str:
+    callbacks = (
+        " | ".join(directives.callbacks_allowed)
+        if directives is not None and directives.callbacks_allowed
+        else "(ninguno)"
+    )
     return (
         "<encargo_de_adaptacion>\n"
         f"<titulo_original>{draft.title}</titulo_original>\n"
@@ -55,9 +62,7 @@ def build_user_message(
         f"<cta_original>{draft.call_to_action}</cta_original>\n"
         f"<audiencia>{spec.audience}</audiencia>\n"
         f"<contexto_cultural>{spec.cultural_context}</contexto_cultural>\n"
-        "<callbacks_permitidos>\n"
-        f"{' | '.join(directives.callbacks_allowed) or '(ninguno)'}\n"
-        "</callbacks_permitidos>\n"
+        f"<callbacks_permitidos>\n{callbacks}\n</callbacks_permitidos>\n"
         "</encargo_de_adaptacion>\n\n"
         "Adapta el guion completo al público objetivo manteniendo escena por "
         "escena la numeración, la estructura y el presupuesto de palabras."

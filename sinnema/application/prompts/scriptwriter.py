@@ -54,7 +54,7 @@ EXCLUSIVAMENTE mediante el esquema estructurado."""
 def build_user_message(
     spec: ProjectSpec,
     chapter: ChapterOutline,
-    directives: ContinuityDirectives,
+    directives: Optional[ContinuityDirectives],
     feedback: Optional[str] = None,
 ) -> str:
     w_min, w_max = spec.format.narration_target_words
@@ -65,6 +65,26 @@ def build_user_message(
         if feedback
         else ""
     )
+    if directives is not None:
+        bloque_directivas = (
+            "<directivas_de_continuidad>\n"
+            f"  recap_bridge: {directives.recap_bridge}\n"
+            f"  conceptos_ya_cubiertos (NO re-explicar): "
+            f"{', '.join(directives.concepts_already_covered) or '(ninguno)'}\n"
+            f"  callbacks_permitidos: {' | '.join(directives.callbacks_allowed) or '(ninguno)'}\n"
+            f"  terminos_nuevos_a_introducir: {', '.join(directives.new_terms_to_introduce)}\n"
+            f"  prohibido_reexplicar: "
+            f"{', '.join(directives.forbidden_reexplanations) or '(nada adicional)'}\n"
+            f"  notas: {directives.continuity_notes}\n"
+            "</directivas_de_continuidad>\n"
+        )
+    else:
+        bloque_directivas = (
+            "<directivas_de_continuidad>\n"
+            "  (sin directivas: el agente de continuidad está desactivado en este "
+            "proyecto; encadena la narración con los títulos de los capítulos)\n"
+            "</directivas_de_continuidad>\n"
+        )
     return (
         "<encargo_de_guion>\n"
         "<capitulo>\n"
@@ -74,16 +94,7 @@ def build_user_message(
         f"  conceptos_clave_a_introducir: {', '.join(chapter.key_concepts)}\n"
         f"  presupuesto_de_palabras: {chapter.word_budget} palabras narradas (rango {w_min}-{w_max})\n"
         "</capitulo>\n"
-        "<directivas_de_continuidad>\n"
-        f"  recap_bridge: {directives.recap_bridge}\n"
-        f"  conceptos_ya_cubiertos (NO re-explicar): "
-        f"{', '.join(directives.concepts_already_covered) or '(ninguno)'}\n"
-        f"  callbacks_permitidos: {' | '.join(directives.callbacks_allowed) or '(ninguno)'}\n"
-        f"  terminos_nuevos_a_introducir: {', '.join(directives.new_terms_to_introduce)}\n"
-        f"  prohibido_reexplicar: "
-        f"{', '.join(directives.forbidden_reexplanations) or '(nada adicional)'}\n"
-        f"  notas: {directives.continuity_notes}\n"
-        "</directivas_de_continuidad>\n"
+        f"{bloque_directivas}"
         f"<audiencia>{spec.audience}</audiencia>\n"
         f"<guia_de_estilo>{spec.style_guide}</guia_de_estilo>\n"
         f"<restricciones>{spec.constraints}</restricciones>\n"

@@ -3,7 +3,13 @@ from __future__ import annotations
 
 import pytest
 
-from sinnema.application.projects import FormatProfile, ProjectSpec, project_from_dict
+from sinnema.application.projects import (
+    AgentConfig,
+    FormatProfile,
+    PipelineConfig,
+    ProjectSpec,
+    project_from_dict,
+)
 from sinnema.infrastructure.projects import DEFAULT_PROJECTS_DIR, list_projects, load_project
 
 from conftest import make_project
@@ -117,6 +123,119 @@ def test_from_dict_con_formato_invalido_rollea_con_contexto():
     datos["formato"] = {"escenas": [8, 6]}  # piso > techo
     with pytest.raises(ValueError, match=r"\[formato\] inválido"):
         project_from_dict(datos)
+
+
+# --------------------------- [agentes] y [pipeline] ---------------------------
+
+
+def test_from_dict_sin_agentes_usa_config_vacia():
+    proyecto = project_from_dict(_toml_minimo())
+    assert proyecto.agentes == {}
+    assert proyecto.agente_activo("critic") is True
+    assert proyecto.config_de_agente("critic").reglas == ()
+    assert proyecto.pipeline == PipelineConfig()
+
+
+def test_from_dict_con_config_de_agente_completa():
+    datos = _toml_minimo()
+    datos["agentes"] = {
+        "scriptwriter": {
+            "reglas": ["Evitar preguntas retóricas", " ", "Cerrar con dato verificable"],
+            "temperatura": 0.9,
+            "proveedor": "Anthropic",
+            "modelo": "claude-3-5-sonnet-latest",
+        },
+        "adapter": {"activo": False},
+    }
+    proyecto = project_from_dict(datos)
+    cfg = proyecto.config_de_agente("scriptwriter")
+    assert cfg.reglas == ("Evitar preguntas retóricas", "Cerrar con dato verificable")
+    assert cfg.temperatura == 0.9
+    assert cfg.proveedor == "anthropic"  # normalizado a minúsculas
+    assert cfg.modelo == "claude-3-5-sonnet-latest"
+    assert proyecto.agente_activo("adapter") is False
+
+
+@pytest.mark.parametrize("rol", ["planner", "scriptwriter"])
+def test_from_dict_rechaza_desactivar_roles_esenciales(rol):
+    datos = _toml_minimo()
+    datos["agentes"] = {rol: {"activo": False}}
+    with pytest.raises(ValueError, match=f"{rol}' no se puede desactivar"):
+        project_from_dict(datos)
+
+
+def test_from_dict_rechaza_rol_desconocido_lista_validos():
+    datos = _toml_minimo()
+    datos["agentes"] = {"guionista": {"activo": False}}
+    with pytest.raises(ValueError, match="no es un rol configurable"):
+        project_from_dict(datos)
+
+
+def test_from_dict_rechaza_proveedor_invalido():
+    datos = _toml_minimo()
+    datos["agentes"] = {"critic": {"proveedor": "copilot"}}
+    with pytest.raises(ValueError, match="proveedor"):
+        project_from_dict(datos)
+
+
+def test_from_dict_rechaza_temperatura_fuera_de_rango():
+    datos = _toml_minimo()
+    datos["agentes"] = {"critic": {"temperatura": 3.5}}
+    with pytest.raises(ValueError, match="temperatura"):
+        project_from_dict(datos)
+
+
+def test_from_dict_rechaza_clave_desconocida_en_agente():
+    datos = _toml_minimo()
+    datos["agentes"] = {"critic": {"temperaturaa": 1.0}}
+    with pytest.raises(ValueError, match="clave desconocida 'temperaturaa'"):
+        project_from_dict(datos)
+
+
+def test_from_dict_reporta_varios_problemas_de_agentes_a_la_vez():
+    datos = _toml_minimo()
+    datos["agentes"] = {
+        "planner": {"activo": False},
+        "critic": {"temperatura": 9.0},
+    }
+    with pytest.raises(ValueError) as excinfo:
+        project_from_dict(datos)
+    mensaje = str(excinfo.value)
+    assert "planner' no se puede desactivar" in mensaje
+    assert "temperatura" in mensaje
+
+
+def test_from_dict_con_pipeline_completo():
+    datos = _toml_minimo()
+    datos["pipeline"] = {
+        "intentos_maximos_de_critica": 3,
+        "politica_al_agotar": "saltar_capitulo",
+    }
+    pipeline = project_from_dict(datos).pipeline
+    assert pipeline.intentos_maximos_de_critica == 3
+    assert pipeline.politica_al_agotar == "skip_chapter"
+
+
+@pytest.mark.parametrize(
+    "pipeline_malo, fragmento",
+    [
+        ({"intentos_maximos_de_critica": 9}, "entre 1 y 5"),
+        ({"politica_al_agotar": "rezar"}, "aceptar_forzado"),
+        ({"reintentos": 2}, "clave desconocida 'reintentos'"),
+    ],
+)
+def test_from_dict_rechaza_pipeline_invalido(pipeline_malo, fragmento):
+    datos = _toml_minimo()
+    datos["pipeline"] = pipeline_malo
+    with pytest.raises(ValueError, match=fragmento):
+        project_from_dict(datos)
+
+
+def test_spec_validate_rechaza_rol_esencial_desactivado_por_construccion_directa():
+    with pytest.raises(ValueError, match="no se puede desactivar"):
+        make_project(
+            agentes={"planner": AgentConfig(activo=False)}
+        ).validate()
 
 
 # --------------------------------- Loader ---------------------------------

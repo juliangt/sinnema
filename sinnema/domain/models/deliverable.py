@@ -36,9 +36,15 @@ class FinalScene(BaseModel):
     narration: str = Field(..., description="Narración final (adaptada al público).")
     on_screen_text: Optional[str] = None
     transition: Transition
-    image_prompt: str = Field(..., min_length=1, description="Vacío = escena sin spec visual.")
-    negative_prompt: str = Field(..., min_length=1)
-    motion_direction: str = Field(..., min_length=1)
+    image_prompt: str = Field(
+        default="", description="Vacío = escena sin spec visual (director técnico desactivado)."
+    )
+    negative_prompt: str = Field(
+        default="", description="Vacío = escena sin spec visual (director técnico desactivado)."
+    )
+    motion_direction: str = Field(
+        default="", description="Vacío = escena sin spec visual (director técnico desactivado)."
+    )
 
 
 class ApprovedEpisode(BaseModel):
@@ -54,8 +60,14 @@ class ApprovedEpisode(BaseModel):
         max_length=SCENES_UNIVERSAL_MAX_COUNT,
     )
     call_to_action: str
-    technical: TechnicalPackage
-    audit: QualityAudit
+    technical: Optional[TechnicalPackage] = Field(
+        default=None,
+        description="None = proyecto sin director técnico (episodio sin specs visuales).",
+    )
+    audit: Optional[QualityAudit] = Field(
+        default=None,
+        description="None = proyecto sin auditor QA (episodio sin dictamen).",
+    )
     forced_acceptance: bool = Field(
         default=False,
         description="True si se aceptó tras agotar los reintentos de QA (best-effort).",
@@ -140,11 +152,12 @@ class SeriesDeliverable(BaseModel):
                 f"pero solo se planificaron {self.total_chapters_planned}."
             )
 
-        # 3) El promedio declarado debe coincidir con el recalculado.
-        if self.episodes:
-            esperado = round(
-                sum(e.audit.overall_score for e in self.episodes) / len(self.episodes), 2
-            )
+        # 3) El promedio declarado debe coincidir con el recalculado. Solo
+        #    participan los episodios con auditoría: los proyectos sin crítico
+        #    no reportan score (0.0), nunca un score inventado.
+        con_auditoria = [e.audit.overall_score for e in self.episodes if e.audit]
+        if con_auditoria:
+            esperado = round(sum(con_auditoria) / len(con_auditoria), 2)
         else:
             esperado = 0.0
         if abs(self.average_quality_score - esperado) > _AVERAGE_TOLERANCE:

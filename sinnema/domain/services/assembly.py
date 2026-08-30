@@ -10,6 +10,7 @@ from typing import Optional
 
 from sinnema.domain.exceptions import DomainValidationError
 from sinnema.domain.models import (
+    AdaptedScene,
     AdaptedScript,
     ApprovedEpisode,
     ChapterOutline,
@@ -19,6 +20,29 @@ from sinnema.domain.models import (
     ScriptDraft,
     TechnicalPackage,
 )
+
+
+def identity_adaptation(draft: ScriptDraft) -> AdaptedScript:
+    """Adaptación identidad: el borrador pasa tal cual al siguiente agente.
+
+    Se usa cuando el proyecto desactiva el adapter: el guion ya está escrito
+    para la audiencia del proyecto (el prompt del guionista la incluye), así
+    que la "adaptación" es conservar escena por escena el contenido original.
+    """
+    return AdaptedScript(
+        chapter_id=draft.chapter_id,
+        adapted_title=draft.title,
+        adapted_hook=draft.hook,
+        adapted_scenes=[
+            AdaptedScene(
+                scene_number=s.scene_number,
+                narration=s.narration,
+                on_screen_text=s.on_screen_text,
+            )
+            for s in draft.scenes
+        ],
+        adapted_cta=draft.call_to_action,
+    )
 
 
 def _mismo_chapter_id(esperado: str, artifacto: str, recibido: str) -> None:
@@ -76,17 +100,23 @@ def assemble_episode(
     order_index: int,
     draft: ScriptDraft,
     adapted: AdaptedScript,
-    package: TechnicalPackage,
-    audit: QualityAudit,
+    package: Optional[TechnicalPackage],
+    audit: Optional[QualityAudit],
 ) -> ApprovedEpisode:
-    """Consolida borrador + adaptación + specs técnicas en un episodio aprobado."""
+    """Consolida borrador + adaptación + specs técnicas en un episodio aprobado.
+
+    ``package`` y ``audit`` pueden ser ``None`` (proyecto con el director
+    técnico o el crítico desactivados): el episodio se ensambla igual, sin
+    specs visuales o sin dictamen de calidad.
+    """
     _mismo_chapter_id(chapter.chapter_id, "borrador", draft.chapter_id)
     validate_adaptation_matches_draft(draft, adapted)
-    validate_package_matches_draft(draft, package)
+    if package is not None:
+        validate_package_matches_draft(draft, package)
 
     escenas_base = {s.scene_number: s for s in draft.scenes}
     escenas_adaptadas = {s.scene_number: s for s in adapted.adapted_scenes}
-    specs = {s.scene_number: s for s in package.visual_specs}
+    specs = {s.scene_number: s for s in package.visual_specs} if package else {}
 
     escenas_finales = []
     for numero in sorted(escenas_base):
@@ -120,7 +150,7 @@ def assemble_episode(
         call_to_action=adapted.adapted_cta,
         technical=package,
         audit=audit,
-        forced_acceptance=not audit.approved,
+        forced_acceptance=audit is not None and not audit.approved,
     )
 
 

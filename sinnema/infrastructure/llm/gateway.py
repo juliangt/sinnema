@@ -16,6 +16,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from sinnema.application.ports import ROLE_SCHEMAS
+from sinnema.application.projects import ProjectSpec
 from sinnema.infrastructure.llm.providers import build_role_clients
 
 logger = logging.getLogger("sinnema.infrastructure.gateway")
@@ -57,16 +58,12 @@ class LangChainStructuredGateway:
                 f"Clientes LLM con roles desconocidos: {desconocidos}. "
                 f"Roles válidos: {sorted(roles_conocidos)}."
             )
-        faltantes = sorted(roles_conocidos - roles_solicitados)
-        if faltantes:
-            raise ValueError(
-                f"Faltan clientes LLM para los roles: {faltantes}. "
-                "El grafo necesita un cliente por rol."
-            )
+        # Los roles sin cliente son los desactivados por el proyecto: se validan
+        # al invocar ``generate`` (un nodo activo jamás debería pedirlos).
 
         self._structured: Dict[str, Any] = {
             role: clients[role].with_structured_output(ROLE_SCHEMAS[role])
-            for role in ROLE_SCHEMAS
+            for role in clients
         }
 
     def generate(
@@ -78,7 +75,8 @@ class LangChainStructuredGateway:
     ) -> TSchema:
         if role not in self._structured:
             raise ValueError(
-                f"Rol desconocido '{role}'. Roles válidos: {sorted(self._structured)}."
+                f"El rol '{role}' no tiene cliente LLM configurado: si está "
+                "desactivado en el proyecto, ningún nodo debería invocarlo."
             )
         if schema is not ROLE_SCHEMAS[role]:
             raise ValueError(
@@ -118,9 +116,22 @@ class LangChainStructuredGateway:
 
 
 def build_gateway(
+    project: Optional[ProjectSpec] = None,
     role_clients: Optional[Mapping[str, BaseChatModel]] = None,
     retry_policy: Optional[RetryPolicy] = None,
 ) -> LangChainStructuredGateway:
-    """Composition helper: resuelve clientes por rol y devuelve el gateway."""
-    clients = dict(role_clients) if role_clients is not None else build_role_clients()
-    return LangChainStructuredGateway(clients, retry_policy)
+    """Composition helper: resuelve clientes por rol y devuelve el gateway.
+
+    Con ``project``, aplica los overrides ``[agentes.<rol>]`` del proyecto
+    (precedencia proyecto > entorno > default) y construye clientes solo para
+    los roles activos: un proyecto que no usa un proveedor no exige su clave.
+    """
+    if role_clients is None:
+        overrides = project.agentes if project is not None else None
+        solo_roles = (
+            [rol for rol in ROLE_SCHEMAS if project.agente_activo(rol)]
+            if project is not None
+            else None
+        )
+        role_clients = build_role_clients(overrides=overrides, solo_roles=solo_roles)
+    return LangChainStructuredGateway(dict(role_clients), retry_policy)

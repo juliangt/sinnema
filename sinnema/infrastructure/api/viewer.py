@@ -37,6 +37,7 @@ h1 { font-size:1.5rem; margin-bottom:4px; }
          margin-left:8px; vertical-align:middle; }
 .badge.ok { background:#17352a; color:var(--ok); }
 .badge.forzado { background:#3a2f16; color:var(--warn); }
+.badge.sin-qa { background:#20263a; color:#9aa3b5; }
 .escena { border-top:1px solid var(--line); padding:12px 0; }
 .escena .num { color:var(--ac); font-weight:600; font-size:.8rem; }
 .escena p { margin:4px 0; }
@@ -64,27 +65,34 @@ def render_deliverable_html(deliverable: Dict[str, Any]) -> str:
 
     bloques = []
     for ep in episodios:
-        audit = ep.get("audit", {})
-        badge = (
-            '<span class="badge forzado">aceptado forzado</span>'
-            if ep.get("forced_acceptance")
-            else '<span class="badge ok">aprobado</span>'
-        )
+        audit = ep.get("audit")
+        if ep.get("forced_acceptance"):
+            badge = '<span class="badge forzado">aceptado forzado</span>'
+        elif audit is None:
+            badge = '<span class="badge sin-qa">sin auditoría</span>'
+        else:
+            badge = '<span class="badge ok">aprobado</span>'
+        score = f'QA {audit.get("overall_score", "?")}/10 · ' if audit else ""
         escenas = []
         for esc in ep.get("scenes", []):
             num = esc.get("scene_number", "?")
+            prompt_bloque = (
+                f"<div class='prompt'><b>imagen:</b> {_esc(esc.get('image_prompt'))}\n"
+                f"<b>movimiento:</b> {_esc(esc.get('motion_direction'))}</div>"
+                if esc.get("image_prompt")
+                else ""
+            )
             escenas.append(
                 f'<div class="escena"><span class="num">ESCENA {num}'
                 f' · {esc.get("duration_seconds", "?")} s</span>'
                 f"<p>{_esc(esc.get('narration'))}</p>"
                 f"<p><i>{_esc(esc.get('on_screen_text'))}</i></p>"
-                f"<div class='prompt'><b>imagen:</b> {_esc(esc.get('image_prompt'))}\n"
-                f"<b>movimiento:</b> {_esc(esc.get('motion_direction'))}</div></div>"
+                f"{prompt_bloque}</div>"
             )
         bloques.append(
             f'<div class="ep"><h2>{ep.get("order_index", 0):02d}. '
             f"{_esc(ep.get('title'))}{badge}</h2>"
-            f'<div class="sub">QA {audit.get("overall_score", "?")}/10 · '
+            f'<div class="sub">{score}'
             f"{_esc(ep.get('hook'))}</div>{''.join(escenas)}"
             f"<p style='margin-top:10px'><b>CTA:</b> {_esc(ep.get('call_to_action'))}</p></div>"
         )

@@ -5,15 +5,27 @@ en prompts, contratos y CLI: identidad, concepto, voz, idioma, estilo visual y
 el sobre editorial numérico (``FormatProfile``). Vive en un archivo TOML que
 carga la infraestructura y llega al pipeline como este objeto validado.
 
+Desde la gestión web, cada proyecto además configura sus agentes (sección
+``[agentes.<rol>]``: reglas, proveedor/modelo/temperatura y activación) y la
+política del pipeline (sección ``[pipeline]``). Ambas son opcionales.
+
 El mapeo ``project_from_dict`` es puro (sin I/O): la infraestructura se ocupa
 de leer el archivo; la aplicación, de decir qué significa un proyecto válido.
 """
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
-from typing import Any, Dict, List
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
+from sinnema.application.ports import (
+    ROLE_ADAPTER,
+    ROLE_CONTINUITY,
+    ROLE_CRITIC,
+    ROLE_DIRECTOR,
+    ROLE_PLANNER,
+    ROLE_SCRIPTWRITER,
+)
 from sinnema.domain.models import FormatProfile
 
 #: Un id de proyecto es un slug estable: nombra carpetas de salida y lore.
@@ -24,6 +36,87 @@ TOPIC_MIN_CHARS = 8
 TOPIC_MAX_CHARS = 200
 
 _VISUAL_MASTER_STYLE_MIN_CHARS = 40
+
+#: Roles configurables en ``[agentes.<rol>]`` y los que no se pueden apagar:
+#: sin plan ni borrador no hay serie; el resto del pipeline puede cortocircuitarse.
+ROLES_CONFIGURABLES: Tuple[str, ...] = (
+    ROLE_PLANNER, ROLE_CONTINUITY, ROLE_SCRIPTWRITER,
+    ROLE_ADAPTER, ROLE_CRITIC, ROLE_DIRECTOR,
+)
+ROLES_ESENCIALES = frozenset({ROLE_PLANNER, ROLE_SCRIPTWRITER})
+
+#: Proveedores LLM válidos para el override por agente (los mismos que resuelve
+#: el adaptador de infraestructura; aquí solo se valida el nombre).
+PROVEEDORES_VALIDOS = frozenset({"anthropic", "openai", "google", "ollama"})
+
+#: Valores en español de ``politica_al_agotar`` -> literal interno del pipeline.
+POLITICAS_DE_AGOTAMIENTO = {
+    "aceptar_forzado": "force_accept",
+    "saltar_capitulo": "skip_chapter",
+}
+
+TEMPERATURA_MIN = 0.0
+TEMPERATURA_MAX = 2.0
+
+
+@dataclass(frozen=True)
+class AgentConfig:
+    """Configuración de un agente (rol) dentro de un proyecto.
+
+    Todo opcional y ``None``/vacío significa "usa el default global". Las
+    ``reglas`` se apendan al final del prompt del sistema del rol; la
+    precedencia de proveedor/modelo/temperatura es proyecto > entorno > default.
+    """
+
+    activo: bool = True
+    reglas: Tuple[str, ...] = ()
+    proveedor: Optional[str] = None
+    modelo: Optional[str] = None
+    temperatura: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        if self.temperatura is not None and not (
+            TEMPERATURA_MIN <= self.temperatura <= TEMPERATURA_MAX
+        ):
+            raise ValueError(
+                f"temperatura debe estar entre {TEMPERATURA_MIN} y "
+                f"{TEMPERATURA_MAX} (recibida: {self.temperatura})."
+            )
+        if self.proveedor is not None and self.proveedor not in PROVEEDORES_VALIDOS:
+            validos = ", ".join(sorted(PROVEEDORES_VALIDOS))
+            raise ValueError(
+                f"proveedor debe ser uno de: {validos} (recibido: '{self.proveedor}')."
+            )
+
+
+@dataclass(frozen=True)
+class PipelineConfig:
+    """Política del pipeline declarada por el proyecto (sección [pipeline]).
+
+    ``None`` en ambos campos = sin preferencia: rigen los defaults de corrida
+    (``max_critique_attempts`` del request) y de ``PipelineSettings``.
+    """
+
+    intentos_maximos_de_critica: Optional[int] = None
+    #: Literal interno: "force_accept" | "skip_chapter" (ver POLITICAS_DE_AGOTAMIENTO).
+    politica_al_agotar: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.intentos_maximos_de_critica is not None and not (
+            1 <= self.intentos_maximos_de_critica <= 5
+        ):
+            raise ValueError(
+                "intentos_maximos_de_critica debe estar entre 1 y 5 "
+                f"(recibido: {self.intentos_maximos_de_critica})."
+            )
+        if self.politica_al_agotar is not None and self.politica_al_agotar not in (
+            "force_accept",
+            "skip_chapter",
+        ):
+            raise ValueError(
+                "politica_al_agotar debe ser 'aceptar_forzado' o 'saltar_capitulo' "
+                f"(recibido: '{self.politica_al_agotar}')."
+            )
 
 
 @dataclass(frozen=True)
@@ -42,6 +135,15 @@ class ProjectSpec:
     constraints: str
     visual_master_style: str
     format: FormatProfile
+    agentes: Mapping[str, AgentConfig] = field(default_factory=dict)
+    pipeline: PipelineConfig = field(default_factory=PipelineConfig)
+
+    def config_de_agente(self, rol: str) -> AgentConfig:
+        """Config del rol para este proyecto (vacía si no se declaró nada)."""
+        return self.agentes.get(rol, AgentConfig())
+
+    def agente_activo(self, rol: str) -> bool:
+        return self.config_de_agente(rol).activo
 
     def validate(self) -> None:
         """Valida todos los campos y reporta TODOS los problemas de una vez."""
@@ -90,6 +192,13 @@ class ProjectSpec:
                 "El campo 'visual_master_style' debe describir el estilo visual "
                 f"maestro en inglés (mínimo {_VISUAL_MASTER_STYLE_MIN_CHARS} caracteres)."
             )
+
+        for rol in sorted(ROLES_ESENCIALES & set(self.agentes)):
+            if not self.agentes[rol].activo:
+                problemas.append(
+                    f"El rol '{rol}' no se puede desactivar: es estructural del "
+                    "pipeline (sin él no hay serie)."
+                )
 
         if problemas:
             raise ValueError(
@@ -153,6 +262,121 @@ def _mapear_seccion(
     return {claves[k]: v for k, v in contenido.items() if k in claves}
 
 
+_CLAVES_AGENTE = frozenset({"activo", "reglas", "proveedor", "modelo", "temperatura"})
+_CLAVES_PIPELINE = frozenset({"intentos_maximos_de_critica", "politica_al_agotar"})
+
+
+def _mapear_agentes(datos: Dict[str, Any], problemas: List[str]) -> Dict[str, AgentConfig]:
+    """Parsea ``[agentes.<rol>]`` acumulando todos los problemas de una vez."""
+    crudo = datos.get("agentes")
+    if crudo is None:
+        return {}
+    if not isinstance(crudo, dict):
+        problemas.append("la sección [agentes] debe contener tablas [agentes.<rol>]")
+        return {}
+
+    configs: Dict[str, AgentConfig] = {}
+    for rol, cfg in crudo.items():
+        if rol not in ROLES_CONFIGURABLES:
+            problemas.append(
+                f"[agentes.{rol}] no es un rol configurable "
+                f"(válidos: {', '.join(ROLES_CONFIGURABLES)})."
+            )
+            continue
+        if not isinstance(cfg, dict):
+            problemas.append(f"[agentes.{rol}] debe ser una tabla TOML")
+            continue
+        for clave in cfg:
+            if clave not in _CLAVES_AGENTE:
+                problemas.append(
+                    f"clave desconocida '{clave}' en [agentes.{rol}] "
+                    f"(válidas: {', '.join(sorted(_CLAVES_AGENTE))})."
+                )
+
+        activo = cfg.get("activo", True)
+        if not isinstance(activo, bool):
+            problemas.append(f"'activo' en [agentes.{rol}] debe ser booleano.")
+            activo = True
+        if not activo and rol in ROLES_ESENCIALES:
+            problemas.append(
+                f"el rol '{rol}' no se puede desactivar: es estructural del "
+                "pipeline (sin él no hay serie)."
+            )
+
+        reglas_crudas = cfg.get("reglas", [])
+        if not isinstance(reglas_crudas, list) or not all(
+            isinstance(r, str) for r in reglas_crudas
+        ):
+            problemas.append(f"'reglas' en [agentes.{rol}] debe ser una lista de textos.")
+            reglas_crudas = []
+        reglas = tuple(r.strip() for r in reglas_crudas if r and r.strip())
+
+        proveedor = cfg.get("proveedor")
+        if proveedor is not None and not isinstance(proveedor, str):
+            problemas.append(f"'proveedor' en [agentes.{rol}] debe ser texto.")
+            proveedor = None
+        modelo = cfg.get("modelo")
+        if modelo is not None and not isinstance(modelo, str):
+            problemas.append(f"'modelo' en [agentes.{rol}] debe ser texto.")
+            modelo = None
+        temperatura = cfg.get("temperatura")
+        if temperatura is not None and not isinstance(temperatura, (int, float)):
+            problemas.append(f"'temperatura' en [agentes.{rol}] debe ser numérica.")
+            temperatura = None
+
+        try:
+            configs[rol] = AgentConfig(
+                activo=activo,
+                reglas=reglas,
+                proveedor=proveedor.strip().lower() if proveedor else None,
+                modelo=modelo.strip() if modelo else None,
+                temperatura=float(temperatura) if temperatura is not None else None,
+            )
+        except ValueError as exc:
+            problemas.append(f"[agentes.{rol}] inválido: {exc}")
+    return configs
+
+
+def _mapear_pipeline(datos: Dict[str, Any], problemas: List[str]) -> PipelineConfig:
+    """Parsea la sección opcional ``[pipeline]``."""
+    crudo = datos.get("pipeline")
+    if crudo is None:
+        return PipelineConfig()
+    if not isinstance(crudo, dict):
+        problemas.append("la sección [pipeline] debe ser una tabla TOML")
+        return PipelineConfig()
+    for clave in crudo:
+        if clave not in _CLAVES_PIPELINE:
+            problemas.append(
+                f"clave desconocida '{clave}' en [pipeline] "
+                f"(válidas: {', '.join(sorted(_CLAVES_PIPELINE))})."
+            )
+
+    intentos = crudo.get("intentos_maximos_de_critica")
+    if intentos is not None and not isinstance(intentos, int):
+        problemas.append("'intentos_maximos_de_critica' en [pipeline] debe ser entero.")
+        intentos = None
+    politica_cruda = crudo.get("politica_al_agotar")
+    politica: Optional[str] = None
+    if politica_cruda is not None:
+        if not isinstance(politica_cruda, str) or politica_cruda not in POLITICAS_DE_AGOTAMIENTO:
+            problemas.append(
+                "'politica_al_agotar' en [pipeline] debe ser "
+                "'aceptar_forzado' o 'saltar_capitulo'."
+            )
+        else:
+            politica = POLITICAS_DE_AGOTAMIENTO[politica_cruda]
+
+    try:
+        return PipelineConfig(
+            intentos_maximos_de_critica=intentos,
+            politica_al_agotar=politica,
+        )
+    except ValueError as exc:
+        problemas.append(f"[pipeline] inválido: {exc}")
+        return PipelineConfig()
+
+
 def project_from_dict(datos: Dict[str, Any]) -> ProjectSpec:
     """Construye y valida un ``ProjectSpec`` desde el dict parseado del TOML."""
     problemas: List[str] = []
@@ -174,11 +398,20 @@ def project_from_dict(datos: Dict[str, Any]) -> ProjectSpec:
     except ValueError as exc:
         raise ValueError(f"[formato] inválido: {exc}") from exc
 
+    agentes = _mapear_agentes(datos, problemas)
+    pipeline = _mapear_pipeline(datos, problemas)
+    if problemas:
+        raise ValueError(
+            "Archivo de proyecto mal formado: " + "; ".join(problemas) + "."
+        )
+
     spec = ProjectSpec(
         **proyecto,
         **voz,
         **visual,
         format=perfil,
+        agentes=agentes,
+        pipeline=pipeline,
     )
     spec.validate()
     return spec

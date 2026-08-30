@@ -34,9 +34,12 @@ def build_deliverable(state: Optional[PipelineState]) -> SeriesDeliverable:
         )
     plan = state["series_plan"]
     episodios = state.get("completed_episodes", [])
+    # Solo episodios con auditoría aportan score: los proyectos sin crítico
+    # reportan 0.0 en vez de un promedio inventado.
+    con_auditoria = [e.audit.overall_score for e in episodios if e.audit]
     promedio = (
-        round(sum(e.audit.overall_score for e in episodios) / len(episodios), 2)
-        if episodios
+        round(sum(con_auditoria) / len(con_auditoria), 2)
+        if con_auditoria
         else 0.0
     )
     return SeriesDeliverable(

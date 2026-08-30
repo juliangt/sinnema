@@ -199,7 +199,7 @@ def test_cli_crea_carpeta_de_auditoria_y_resumen_por_ejecucion(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         "sinnema.infrastructure.cli.main.build_gateway",
-        lambda: gateway_con_serie(num_chapters=2),
+        lambda proyecto: gateway_con_serie(num_chapters=2),
     )
     monkeypatch.setattr("sys.argv", ["sinnema", "-n", "2"])
 

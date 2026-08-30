@@ -3,14 +3,17 @@ from __future__ import annotations
 
 import pytest
 
+from sinnema.application.projects import AgentConfig
+from sinnema.infrastructure.llm.gateway import build_gateway
 from sinnema.infrastructure.llm.providers import (
     DEFAULT_ROLE_SPECS,
     apply_env_overrides,
     build_role_clients,
     provider_available,
+    resolve_role_spec,
 )
 
-from conftest import entorno_llm_limpio  # noqa: F401 - fixture usada vía parámetro
+from conftest import entorno_llm_limpio, make_project  # noqa: F401 - fixture usada vía parámetro
 
 
 def test_proveedor_desconocido_no_esta_disponible():
@@ -54,3 +57,52 @@ def test_sin_proveedor_disponible_error_accionable(
     monkeypatch.setattr(providers, "provider_available", lambda proveedor: False)
     with pytest.raises(RuntimeError, match="LLM_PROVIDER_PLANNER"):
         build_role_clients()
+
+
+# ------------------- Overrides por proyecto ([agentes.<rol>]) -------------------
+
+
+def _spec_de(rol):
+    return next(s for s in DEFAULT_ROLE_SPECS if s.role == rol)
+
+
+def test_override_de_proyecto_gana_a_entorno_y_default(entorno_llm_limpio, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("LLM_MODEL_SCRIPTWRITER", "modelo-de-entorno")
+    config = AgentConfig(modelo="modelo-del-proyecto", temperatura=0.5)
+    resuelto = resolve_role_spec(_spec_de("scriptwriter"), config)
+    assert resuelto.model == "modelo-del-proyecto"
+    assert resuelto.temperature == 0.5
+
+
+def test_entorno_gana_a_default_cuando_el_proyecto_no_declara(entorno_llm_limpio, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("LLM_MODEL_SCRIPTWRITER", "modelo-de-entorno")
+    resuelto = resolve_role_spec(_spec_de("scriptwriter"), AgentConfig())
+    assert resuelto.model == "modelo-de-entorno"
+    assert resuelto.temperature == _spec_de("scriptwriter").temperature
+
+
+def test_proyecto_puede_cambiar_proveedor(entorno_llm_limpio):
+    clientes = build_role_clients(
+        overrides={"scriptwriter": AgentConfig(proveedor="ollama", modelo="llama3.1")}
+    )
+    assert type(clientes["scriptwriter"]).__name__ == "ChatOllama"
+
+
+def test_solo_roles_no_incluye_los_desactivados(entorno_llm_limpio):
+    clientes = build_role_clients(solo_roles=["planner", "scriptwriter"])
+    assert set(clientes) == {"planner", "scriptwriter"}
+
+
+def test_build_gateway_con_proyecto_filtra_roles_inactivos(entorno_llm_limpio):
+    proyecto = make_project(
+        agentes={
+            "critic": AgentConfig(activo=False),
+            "technical_director": AgentConfig(activo=False),
+        }
+    )
+    gateway = build_gateway(proyecto)
+    assert set(gateway._structured) == {
+        "planner", "continuity", "scriptwriter", "adapter",
+    }

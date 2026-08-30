@@ -233,7 +233,7 @@ def main() -> int:
         return 2
 
     try:
-        gateway = build_gateway()
+        gateway = build_gateway(proyecto)
     except RuntimeError as exc:
         print(f"[error de configuración] {exc}", file=sys.stderr)
         return 2
@@ -243,7 +243,10 @@ def main() -> int:
     audit = FilesystemAuditTrail(carpeta_auditoria)
     lore_store = JsonLoreStore()
 
-    settings = PipelineSettings(max_critique_attempts=args.max_critique_attempts)
+    settings = PipelineSettings(
+        max_critique_attempts=args.max_critique_attempts,
+        retry_exhaustion_policy=proyecto.pipeline.politica_al_agotar or "force_accept",
+    )
     use_case = GenerateSeriesUseCase(gateway, proyecto, settings, audit=audit, lore_store=lore_store)
 
     print(
