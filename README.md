@@ -555,3 +555,8 @@ checkpoints, auditoría, lore y salidas; por defecto `datos-servidor/`),
 `pyproject.toml` (Hatchling) declara el paquete `sinnema`, los extras
 `[server]` y `[dev]`, los entry points `sinnema` y `sinnema-server`, y
 incluye `proyectos/*.toml` dentro de la wheel. Build: `python -m build`.
+
+## Licencia
+
+Este proyecto está bajo la Licencia MIT. Consulta el archivo [LICENSE](LICENSE) para más detalles.
+
