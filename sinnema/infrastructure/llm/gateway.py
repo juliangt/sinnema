@@ -16,7 +16,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from sinnema.application.ports import ROLE_SCHEMAS
-from sinnema.application.projects import ProjectSpec
+from sinnema.application.projects import ProjectSpec, resolver_flujo
 from sinnema.infrastructure.llm.providers import build_role_clients
 
 logger = logging.getLogger("sinnema.infrastructure.gateway")
@@ -115,6 +115,26 @@ class LangChainStructuredGateway:
         ) from ultimo_error
 
 
+def _roles_con_cliente(project: ProjectSpec) -> list[str]:
+    """Roles que necesitan cliente LLM para este proyecto.
+
+    Con ``[flujo]`` declarado la lista manda: solo los roles del flujo
+    EFECTIVO (``resolver_flujo``, ya truncado por ``hasta``) obtienen cliente;
+    un rol fuera del flujo no exige clave de proveedor. Sin ``[flujo]`` rige
+    la semántica legacy: el flujo implícito contiene a los seis roles y
+    ``activo = false`` decide quién cortocircuita (también sin cliente).
+    La intersección cubre además el override ``--hasta`` del CLI sobre un
+    proyecto legacy: los roles truncados por el hito tampoco necesitan cliente.
+    """
+    flujo = resolver_flujo(project)
+    en_flujo = set(flujo.roles_completos())
+    if flujo.declarado:
+        return [rol for rol in ROLE_SCHEMAS if rol in en_flujo]
+    return [
+        rol for rol in ROLE_SCHEMAS
+        if rol in en_flujo and project.agente_activo(rol)
+    ]
+
 def build_gateway(
     project: Optional[ProjectSpec] = None,
     role_clients: Optional[Mapping[str, BaseChatModel]] = None,
@@ -124,14 +144,12 @@ def build_gateway(
 
     Con ``project``, aplica los overrides ``[agentes.<rol>]`` del proyecto
     (precedencia proyecto > entorno > default) y construye clientes solo para
-    los roles activos: un proyecto que no usa un proveedor no exige su clave.
+    los roles del flujo efectivo: un rol que no corre (fuera del ``[flujo]``,
+    truncado por ``hasta`` o desactivado en un proyecto legacy) no exige su
+    clave de proveedor.
     """
     if role_clients is None:
         overrides = project.agentes if project is not None else None
-        solo_roles = (
-            [rol for rol in ROLE_SCHEMAS if project.agente_activo(rol)]
-            if project is not None
-            else None
-        )
+        solo_roles = _roles_con_cliente(project) if project is not None else None
         role_clients = build_role_clients(overrides=overrides, solo_roles=solo_roles)
     return LangChainStructuredGateway(dict(role_clients), retry_policy)

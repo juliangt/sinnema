@@ -106,3 +106,77 @@ def test_build_gateway_con_proyecto_filtra_roles_inactivos(entorno_llm_limpio):
     assert set(gateway._structured) == {
         "planner", "continuity", "scriptwriter", "adapter",
     }
+
+
+# ----------------- Roles efectivos vía [flujo] (agentes dinámicos) -----------------
+
+
+def test_build_gateway_con_flujo_declara_solo_los_roles_del_flujo(entorno_llm_limpio):
+    """La lista de [flujo] manda sobre `activo`: los omitidos no reciben cliente."""
+    from sinnema.application.projects import FlowSpec
+
+    proyecto = make_project(
+        flujo=FlowSpec(
+            contexto=("continuity",),
+            transformaciones=(),
+            revisor=None,
+            enriquecimiento=(),
+            hasta="guion",
+        ),
+    )
+    gateway = build_gateway(proyecto)
+    assert set(gateway._structured) == {"planner", "continuity", "scriptwriter"}
+
+
+def test_build_gateway_con_flujo_no_exige_clave_del_rol_omitido(
+    entorno_llm_limpio, monkeypatch
+):
+    """Un rol fuera del flujo efectivo no exige clave de proveedor."""
+    import sinnema.infrastructure.llm.providers as providers
+    from sinnema.application.projects import FlowSpec
+
+    # Sin claves de Google/Gemini el director técnico caería en fallback u
+    # error; con [flujo] que lo omite, ni se le consulta.
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    proyecto = make_project(
+        flujo=FlowSpec(
+            contexto=("continuity",),
+            transformaciones=("adapter",),
+            revisor="critic",
+            enriquecimiento=(),
+            hasta="auditado",
+        ),
+    )
+    gateway = build_gateway(proyecto)
+    assert "technical_director" not in gateway._structured
+    assert set(gateway._structured) == {
+        "planner", "continuity", "scriptwriter", "adapter", "critic",
+    }
+    assert providers.provider_available("google") is False
+
+
+def test_build_gateway_con_hasta_plan_solo_construye_el_planner(entorno_llm_limpio):
+    from sinnema.application.projects import FlowSpec
+
+    proyecto = make_project(
+        flujo=FlowSpec(
+            contexto=("continuity",),
+            transformaciones=("adapter",),
+            revisor="critic",
+            enriquecimiento=("technical_director",),
+            hasta="plan",
+        ),
+    )
+    gateway = build_gateway(proyecto)
+    assert set(gateway._structured) == {"planner"}
+
+
+def test_build_gateway_sin_flujo_conserva_la_semantica_legacy(entorno_llm_limpio):
+    """Sin [flujo], el comportamiento histórico: solo `activo` decide."""
+    proyecto = make_project()  # todos los roles activos
+    gateway = build_gateway(proyecto)
+    assert set(gateway._structured) == {
+        "planner", "continuity", "scriptwriter", "adapter", "critic",
+        "technical_director",
+    }

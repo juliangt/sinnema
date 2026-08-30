@@ -32,7 +32,7 @@ try:  # carga opcional de .env si el usuario instaló python-dotenv
 except ImportError:  # pragma: no cover
     pass
 
-from sinnema.application.projects import ProjectSpec
+from sinnema.application.projects import ProjectSpec, con_hasta
 from sinnema.application.requests import (
     MAX_CRITIQUE_ATTEMPTS_LIMIT,
     SeriesRequest,
@@ -40,7 +40,7 @@ from sinnema.application.requests import (
 from sinnema.application.settings import PipelineSettings
 from sinnema.application.state import PipelineState
 from sinnema.application.use_cases import GenerateSeriesUseCase, build_deliverable
-from sinnema.domain.constants import SERIES_MAX_CHAPTERS
+from sinnema.domain.constants import ALCANCES, ALCANCE_DEFAULT, SERIES_MAX_CHAPTERS
 from sinnema.domain.exceptions import DomainValidationError
 from sinnema.domain.models import SeriesDeliverable
 from sinnema.infrastructure.audit import FilesystemAuditTrail
@@ -72,6 +72,16 @@ def _int_en_rango(minimo: int, maximo: int, mensaje: str):
     return _validar
 
 
+def _hasta_valido(valor: str) -> str:
+    """Valida el hito ``--hasta`` contra el vocabulario cerrado de alcances."""
+    if valor not in ALCANCES:
+        raise argparse.ArgumentTypeError(
+            f"'{valor}' no es un hito válido (opciones: {', '.join(ALCANCES)}; "
+            f"default: '{ALCANCE_DEFAULT}')."
+        )
+    return valor
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="sinnema",
@@ -99,6 +109,12 @@ def _parse_args() -> argparse.Namespace:
         default=2, help=f"Límite duro de reintentos del ciclo de crítica (1-{MAX_CRITIQUE_ATTEMPTS_LIMIT}).",
     )
     parser.add_argument(
+        "--hasta", type=_hasta_valido, default=None,
+        help="Último hito del pipeline que alcanza ESTA corrida, sobreescribiendo "
+        f"el '[flujo].hasta' del proyecto (precedencia: flag > proyecto > '{ALCANCE_DEFAULT}'). "
+        f"Opciones: {', '.join(ALCANCES)}.",
+    )
+    parser.add_argument(
         "-o", "--output", default=None,
         help="Ruta del JSON de salida (por defecto salidas/<proyecto>/serie_<timestamp>.json).",
     )
@@ -122,6 +138,18 @@ def build_request_from_args(args: argparse.Namespace, project: ProjectSpec) -> S
     )
     request.validate()
     return request
+
+
+def proyecto_para_corrida(args: argparse.Namespace, project: ProjectSpec) -> ProjectSpec:
+    """Proyecto con el hito de la corrida: precedencia flag ``--hasta`` > proyecto.
+
+    Sin flag el proyecto manda (y sin ``[flujo]``, el default ``produccion``);
+    con flag, ``con_hasta`` valida la coherencia del hito con el flujo declarado
+    (p. ej. ``--hasta auditado`` sobre un flujo sin revisor es un error accionable).
+    """
+    if args.hasta is None:
+        return project
+    return con_hasta(project, args.hasta)
 
 
 def _print_projects(proyectos: list[ProjectSpec]) -> None:
@@ -159,18 +187,33 @@ def _print_progress(paso: int, state: PipelineState) -> None:
     )
 
 
+#: Etiqueta humana de cada hito del alcance (para resumen CLI y visor).
+ETIQUETAS_ALCANCE = {
+    "plan": "plan (outline sin episodios)",
+    "guion": "guion (borradores)",
+    "guion_final": "guion final (sin specs de video)",
+    "auditado": "auditado (con dictamen de calidad)",
+    "produccion": "producción (paquete completo)",
+}
+
+
 def _print_summary(
     deliverable: SeriesDeliverable, ruta: Path, carpeta_auditoria: Path
 ) -> None:
     print("\n" + "=" * 62)
     print(f"PROYECTO: {deliverable.project_id} · SERIE: {deliverable.series_title}")
+    print(f"Alcance de la corrida: {ETIQUETAS_ALCANCE.get(deliverable.alcance, deliverable.alcance)}")
     print(f"Episodios aprobados: {len(deliverable.episodes)}/{deliverable.total_chapters_planned} "
           f"(score medio: {deliverable.average_quality_score}/10)")
     for episodio in deliverable.episodes:
         estado = " · ACEPTADO FORZADO tras agotar reintentos" if episodio.forced_acceptance else ""
+        qa = (
+            f"QA {episodio.audit.overall_score}/10"
+            if episodio.audit else "sin dictamen de QA"
+        )
         print(
             f"  [{episodio.order_index:02d}] {episodio.title} "
-            f"— QA {episodio.audit.overall_score}/10{estado}"
+            f"— {qa}{estado}"
         )
     for fallo in deliverable.failed_chapters:
         print(f"  [xx] {fallo.title} — DESCARTADO: {fallo.reason}")
@@ -189,7 +232,11 @@ def _auditar_resumen(
         f"entregable JSON: {ruta}",
         f"términos en el lore: {len(deliverable.lore_glossary)}",
         *(
-            f"episodio {e.order_index:02d}: {e.title} — QA {e.audit.overall_score}/10"
+            f"episodio {e.order_index:02d}: {e.title} — "
+            + (
+                f"QA {e.audit.overall_score}/10"
+                if e.audit else "sin dictamen de QA"
+            )
             + (" · aceptación forzada" if e.forced_acceptance else "")
             for e in deliverable.episodes
         ),
@@ -224,6 +271,12 @@ def main() -> int:
         proyecto = load_project(args.project)
     except RuntimeError as exc:
         print(f"[error de proyecto] {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        proyecto = proyecto_para_corrida(args, proyecto)
+    except ValueError as exc:
+        print(f"[error de configuración] {exc}", file=sys.stderr)
         return 2
 
     try:
