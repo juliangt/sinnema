@@ -47,12 +47,12 @@ def test_episodio_con_duracion_total_insuficiente_rechazado():
         ApprovedEpisode(**datos)
 
 
-def test_escena_final_sin_prompt_de_imagen_rechazada():
+def test_escena_final_sin_prompt_de_imagen_permitida_sin_director_tecnico():
     episodio = _episodio()
     datos = episodio.model_dump()
     datos["scenes"][0]["image_prompt"] = ""
-    with pytest.raises(ValidationError):
-        ApprovedEpisode(**datos)
+    episodio_sin_spec = ApprovedEpisode(**datos)
+    assert episodio_sin_spec.scenes[0].image_prompt == ""
 
 
 def test_escena_final_con_transicion_invalida_rechazada():
@@ -64,6 +64,27 @@ def test_escena_final_con_transicion_invalida_rechazada():
 
 
 # --------------------------- SeriesDeliverable ---------------------------
+
+
+def test_episodio_sin_auditoria_ni_paquete_tecnico_se_ensambla():
+    """Proyecto con crítico y director técnico desactivados."""
+    capitulo = make_chapter(1)
+    borrador = make_draft(capitulo.chapter_id)
+    episodio = assemble_episode(
+        chapter=capitulo,
+        order_index=1,
+        draft=borrador,
+        adapted=make_adapted(borrador),
+        package=None,
+        audit=None,
+    )
+    assert episodio.audit is None
+    assert episodio.technical is None
+    assert episodio.forced_acceptance is False
+    assert all(
+        s.image_prompt == "" and s.negative_prompt == "" and s.motion_direction == ""
+        for s in episodio.scenes
+    )
 
 
 def _entregable(**overrides) -> SeriesDeliverable:
@@ -120,6 +141,35 @@ def test_entregable_con_mas_reportes_que_planificados_rechazado():
 def test_entregable_con_promedio_incoherente_rechazado():
     with pytest.raises(ValidationError, match="average_quality_score"):
         _entregable(average_quality_score=5.0)
+
+
+def _episodio_sin_audit(indice: int) -> ApprovedEpisode:
+    capitulo = make_chapter(indice)
+    borrador = make_draft(capitulo.chapter_id)
+    return assemble_episode(
+        chapter=capitulo,
+        order_index=indice,
+        draft=borrador,
+        adapted=make_adapted(borrador),
+        package=None,
+        audit=None,
+    )
+
+
+def test_entregable_sin_auditorias_reporta_score_cero():
+    entregable = _entregable(
+        episodes=[_episodio_sin_audit(1), _episodio_sin_audit(2)],
+        average_quality_score=0.0,
+    )
+    assert entregable.average_quality_score == 0.0
+
+
+def test_entregable_mezclando_episodios_con_y_sin_auditoria_promedia_solo_los_auditados():
+    entregable = _entregable(
+        episodes=[_episodio(1), _episodio_sin_audit(2)],  # solo ch-01 tiene score 9
+        average_quality_score=9.0,
+    )
+    assert entregable.average_quality_score == 9.0
 
 
 def test_entregable_sin_episodios_exige_promedio_cero():

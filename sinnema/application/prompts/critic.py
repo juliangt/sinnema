@@ -1,6 +1,8 @@
 """Prompts del CHIEF EDITOR / CRITIC (auditor) por proyecto."""
 from __future__ import annotations
 
+from typing import Optional
+
 from sinnema.application.projects import ProjectSpec
 from sinnema.domain.models import (
     AdaptedScript,
@@ -50,7 +52,7 @@ def build_user_message(
     chapter: ChapterOutline,
     draft: ScriptDraft,
     adapted: AdaptedScript,
-    directives: ContinuityDirectives,
+    directives: Optional[ContinuityDirectives],
     actual_word_count: int,
 ) -> str:
     w_min, w_max = spec.format.narration_target_words
@@ -67,6 +69,21 @@ def build_user_message(
             f"    texto_en_pantalla: {s.on_screen_text or '—'}"
         )
     escenas_texto = "\n".join(escenas)
+    if directives is not None:
+        bloque_directivas = (
+            "<directivas_de_continuidad>\n"
+            f"  conceptos_ya_cubiertos: {', '.join(directives.concepts_already_covered) or '(ninguno)'}\n"
+            f"  prohibido_reexplicar: {', '.join(directives.forbidden_reexplanations) or '(nada)'}\n"
+            f"  terminos_nuevos: {', '.join(directives.new_terms_to_introduce)}\n"
+            "</directivas_de_continuidad>\n"
+        )
+    else:
+        bloque_directivas = (
+            "<directivas_de_continuidad>\n"
+            "  (sin directivas: el agente de continuidad está desactivado en este "
+            "proyecto; audita coherencia con los títulos de los capítulos)\n"
+            "</directivas_de_continuidad>\n"
+        )
     return (
         "<auditoria>\n"
         "<capitulo>\n"
@@ -84,11 +101,7 @@ def build_user_message(
         f"<presupuesto_requerido>{w_min}-{w_max} palabras narradas</presupuesto_requerido>\n"
         f"<conteo_real_palabras>{actual_word_count}</conteo_real_palabras>\n"
         f"<duracion_estimada_segundos>{draft.total_duration_seconds}</duracion_estimada_segundos>\n"
-        "<directivas_de_continuidad>\n"
-        f"  conceptos_ya_cubiertos: {', '.join(directives.concepts_already_covered) or '(ninguno)'}\n"
-        f"  prohibido_reexplicar: {', '.join(directives.forbidden_reexplanations) or '(nada)'}\n"
-        f"  terminos_nuevos: {', '.join(directives.new_terms_to_introduce)}\n"
-        "</directivas_de_continuidad>\n"
+        f"{bloque_directivas}"
         "</auditoria>\n\n"
         "Emite el dictamen de calidad completo."
     )

@@ -22,7 +22,7 @@ from sinnema.application.ports import (
     ROLE_PLANNER,
     ROLE_SCRIPTWRITER,
 )
-from sinnema.application.projects import ProjectSpec
+from sinnema.application.projects import AgentConfig, ProjectSpec
 from sinnema.application.prompts import (
     adapter,
     continuity,
@@ -43,13 +43,33 @@ __all__ = [
 ]
 
 
+def _con_reglas(prompt_base: str, config: AgentConfig) -> str:
+    """Apenda las reglas del proyecto al prompt del sistema de un rol."""
+    if not config.reglas:
+        return prompt_base
+    reglas = "\n".join(f"- {r}" for r in config.reglas)
+    return (
+        f"{prompt_base}\n\n"
+        "REGLAS ADICIONALES DEL PROYECTO (si conflitan con lo anterior, "
+        f"prevalecen):\n{reglas}"
+    )
+
+
 def build_role_system_prompts(spec: ProjectSpec) -> Dict[str, str]:
-    """System prompt de cada rol para un proyecto, indexado por rol."""
+    """System prompt de cada rol para un proyecto, indexado por rol.
+
+    Cada prompt base del rol se compone con el ``ProjectSpec`` y luego recibe
+    las ``reglas`` declaradas en ``[agentes.<rol>]`` del proyecto, si las hay.
+    """
+
+    def _de(rol: str, builder) -> str:
+        return _con_reglas(builder(spec), spec.config_de_agente(rol))
+
     return {
-        ROLE_PLANNER: planner.build_system_prompt(spec),
-        ROLE_CONTINUITY: continuity.build_system_prompt(spec),
-        ROLE_SCRIPTWRITER: scriptwriter.build_system_prompt(spec),
-        ROLE_ADAPTER: adapter.build_system_prompt(spec),
-        ROLE_CRITIC: critic.build_system_prompt(spec),
-        ROLE_DIRECTOR: director.build_system_prompt(spec),
+        ROLE_PLANNER: _de(ROLE_PLANNER, planner.build_system_prompt),
+        ROLE_CONTINUITY: _de(ROLE_CONTINUITY, continuity.build_system_prompt),
+        ROLE_SCRIPTWRITER: _de(ROLE_SCRIPTWRITER, scriptwriter.build_system_prompt),
+        ROLE_ADAPTER: _de(ROLE_ADAPTER, adapter.build_system_prompt),
+        ROLE_CRITIC: _de(ROLE_CRITIC, critic.build_system_prompt),
+        ROLE_DIRECTOR: _de(ROLE_DIRECTOR, director.build_system_prompt),
     }

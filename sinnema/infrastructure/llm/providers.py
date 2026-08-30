@@ -9,9 +9,11 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Dict, Iterable, Mapping, Optional, Tuple
 
 from langchain_core.language_models.chat_models import BaseChatModel
+
+from sinnema.application.projects import AgentConfig
 
 # --- Clientes LLM por proveedor (imports con guarda para instalar solo lo usado) ---
 try:
@@ -115,17 +117,40 @@ def apply_env_overrides(spec: RoleSpec) -> RoleSpec:
     return spec.with_overrides(provider, model)
 
 
+def resolve_role_spec(spec: RoleSpec, config: AgentConfig) -> RoleSpec:
+    """Precedencia completa de un rol: proyecto > entorno > default."""
+    base = apply_env_overrides(spec)
+    return RoleSpec(
+        role=base.role,
+        provider=config.proveedor or base.provider,
+        model=config.modelo or base.model,
+        temperature=(
+            config.temperatura
+            if config.temperatura is not None
+            else base.temperature
+        ),
+        fallback_providers=base.fallback_providers,
+    )
+
+
 def build_role_clients(
     role_specs: Tuple[RoleSpec, ...] = DEFAULT_ROLE_SPECS,
+    overrides: Optional[Mapping[str, AgentConfig]] = None,
+    solo_roles: Optional[Iterable[str]] = None,
 ) -> Dict[str, BaseChatModel]:
     """Resuelve un cliente LLM por rol, con cadena de fallback entre proveedores.
 
-    Lanza ``RuntimeError`` con instrucciones accionables si algún rol se queda
-    sin proveedor utilizable.
+    ``overrides`` aplica la configuración ``[agentes.<rol>]`` del proyecto y
+    ``solo_roles`` limita qué roles obtienen cliente (los desactivados por el
+    proyecto no necesitan proveedor). Lanza ``RuntimeError`` con instrucciones
+    accionables si algún rol solicitado se queda sin proveedor utilizable.
     """
+    overrides = overrides or {}
     clientes: Dict[str, BaseChatModel] = {}
     for spec_bruto in role_specs:
-        spec = apply_env_overrides(spec_bruto)
+        if solo_roles is not None and spec_bruto.role not in solo_roles:
+            continue
+        spec = resolve_role_spec(spec_bruto, overrides.get(spec_bruto.role, AgentConfig()))
         candidatos = (spec.provider,) + tuple(
             p for p in spec.fallback_providers if p != spec.provider
         )

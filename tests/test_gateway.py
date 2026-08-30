@@ -5,7 +5,7 @@ import pytest
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from sinnema.application.ports import ROLE_SCHEMAS
-from sinnema.domain.models import ContinuityDirectives, SeriesPlan
+from sinnema.domain.models import ContinuityDirectives, QualityAudit, SeriesPlan
 from sinnema.infrastructure.llm.gateway import (
     LangChainStructuredGateway,
     RetryPolicy,
@@ -104,10 +104,22 @@ def test_agota_reintentos_y_falla_con_contexto():
         gateway.generate("planner", SeriesPlan, "s", "u")
 
 
-def test_rol_desconocido_rechazado():
+def test_rol_sin_cliente_rechazado():
     gateway = LangChainStructuredGateway(clientes_completos(), RetryPolicy(1, 0.0))
-    with pytest.raises(ValueError, match="Rol desconocido"):
+    with pytest.raises(ValueError, match="no tiene cliente LLM configurado"):
         gateway.generate("traductor", SeriesPlan, "s", "u")
+
+
+def test_roles_desactivados_se_admiten_sin_cliente():
+    """Los roles sin cliente (desactivados por el proyecto) se toleran en el
+    wiring; el error aparece solo si alguien los invoca."""
+    clientes = clientes_completos()
+    del clientes["critic"]
+    del clientes["technical_director"]
+    gateway = LangChainStructuredGateway(clientes, RetryPolicy(1, 0.0))
+    assert "critic" not in gateway._structured
+    with pytest.raises(ValueError, match="no tiene cliente LLM configurado"):
+        gateway.generate("critic", QualityAudit, "s", "u")
 
 
 def test_esquema_que_no_coincide_con_el_rol_rechazado():
@@ -119,8 +131,10 @@ def test_esquema_que_no_coincide_con_el_rol_rechazado():
 def test_faltan_roles_por_cubrir_rechazado():
     clientes = clientes_completos()
     del clientes["critic"]
-    with pytest.raises(ValueError, match="Faltan clientes"):
-        LangChainStructuredGateway(clientes, RetryPolicy(1, 0.0))
+    gateway = LangChainStructuredGateway(clientes, RetryPolicy(1, 0.0))
+    # El rol desactivado no tiene runnable: invocarlo es el error accionable.
+    with pytest.raises(ValueError, match="critic"):
+        gateway.generate("critic", QualityAudit, "s", "u")
 
 
 def test_roles_desconocidos_en_el_wiring_rechazados():

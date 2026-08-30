@@ -25,6 +25,7 @@ from sinnema.application.prompts import (
     scriptwriter,
 )
 from sinnema.application.prompts import build_role_system_prompts
+from sinnema.application.projects import AgentConfig
 from sinnema.domain.models import FormatProfile
 
 from conftest import (
@@ -191,3 +192,57 @@ def test_mensaje_de_continuidad_con_memoria_vacia():
     )
     assert "memoria de continuidad vacía" in mensaje
     _assert_tags_balanceados(mensaje)
+
+
+# ------------------- Reglas por agente y directivas ausentes -------------------
+
+
+def test_reglas_del_proyecto_se_inyectan_solo_en_el_rol_configurado():
+    proyecto = make_project(
+        agentes={
+            ROLE_CRITIC: AgentConfig(
+                reglas=("Exigir fuente verificable", "Cero emojis")
+            ),
+            ROLE_SCRIPTWRITER: AgentConfig(),  # declarado pero sin reglas
+        }
+    )
+    prompts = build_role_system_prompts(proyecto)
+    assert "REGLAS ADICIONALES DEL PROYECTO" in prompts[ROLE_CRITIC]
+    assert "- Exigir fuente verificable" in prompts[ROLE_CRITIC]
+    assert "- Cero emojis" in prompts[ROLE_CRITIC]
+    assert "REGLAS ADICIONALES" not in prompts[ROLE_SCRIPTWRITER]
+    assert "REGLAS ADICIONALES" not in prompts[ROLE_PLANNER]
+
+
+def test_proyecto_sin_reglas_no_agrega_bloque():
+    for rol, prompt in build_role_system_prompts(make_project()).items():
+        assert "REGLAS ADICIONALES" not in prompt, f"rol {rol}"
+
+
+def test_mensajes_tolera_directivas_none_por_continuidad_desactivada():
+    proyecto = make_project()
+    capitulo = make_chapter(1)
+    borrador = make_draft()
+
+    msg_guionista = scriptwriter.build_user_message(
+        proyecto, chapter=capitulo, directives=None
+    )
+    assert "sin directivas" in msg_guionista
+    _assert_tags_balanceados(msg_guionista)
+
+    msg_adapter = adapter.build_user_message(
+        proyecto, draft=borrador, directives=None
+    )
+    assert "(ninguno)" in msg_adapter
+    _assert_tags_balanceados(msg_adapter)
+
+    msg_critico = critic.build_user_message(
+        proyecto,
+        chapter=capitulo,
+        draft=borrador,
+        adapted=make_adapted(borrador),
+        directives=None,
+        actual_word_count=137,
+    )
+    assert "sin directivas" in msg_critico
+    _assert_tags_balanceados(msg_critico)

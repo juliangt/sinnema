@@ -67,6 +67,7 @@ from sinnema.domain.services import (
     assemble_episode,
     build_failed_record,
     extract_new_lore,
+    identity_adaptation,
     validate_adaptation_format,
     validate_adaptation_matches_draft,
     validate_audit_verdict,
@@ -134,6 +135,14 @@ def build_pipeline_graph(
     def _continuity_master(state: PipelineState) -> Dict[str, Any]:
         """Lore Keeper: emite directivas de continuidad para el capítulo actual."""
         plan, capitulo, indice = _current_chapter(state)
+        if not project.agente_activo(ROLE_CONTINUITY):
+            logger.info("Continuidad desactivada: %s sigue sin directivas.", capitulo.chapter_id)
+            audit.log_step(
+                "continuity_master",
+                f"Agente desactivado en el proyecto: {capitulo.chapter_id} "
+                "avanza sin directivas de continuidad.",
+            )
+            return {"continuity_directives": None}
         previo = plan.chapters[indice - 1] if indice > 0 else None
         mensaje = continuity_prompts.build_user_message(
             chapter=capitulo,
@@ -186,6 +195,15 @@ def build_pipeline_graph(
         """Audience Adapter: re-escribe al registro y cultura del público objetivo."""
         _, capitulo, _ = _current_chapter(state)
         borrador: ScriptDraft = state["draft_script"]
+        if not project.agente_activo(ROLE_ADAPTER):
+            adaptado = identity_adaptation(borrador)
+            logger.info("Adapter desactivado: %s pasa con adaptación identidad.", capitulo.chapter_id)
+            audit.log_step(
+                "persona_adapter",
+                f"Agente desactivado en el proyecto: el guion de "
+                f"{capitulo.chapter_id} pasa tal cual (adaptación identidad).",
+            )
+            return {"adapted_script": adaptado}
         mensaje = adapter_prompts.build_user_message(
             project,
             draft=borrador,
@@ -208,6 +226,14 @@ def build_pipeline_graph(
     def _chief_critic(state: PipelineState) -> Dict[str, Any]:
         """Auditor: dictamen booleano + feedback accionable; incrementa reintentos."""
         _, capitulo, _ = _current_chapter(state)
+        if not project.agente_activo(ROLE_CRITIC):
+            logger.info("Crítico desactivado: %s se aprueba sin auditoría.", capitulo.chapter_id)
+            audit.log_step(
+                "chief_critic",
+                f"Agente desactivado en el proyecto: {capitulo.chapter_id} "
+                "se aprueba sin dictamen de calidad.",
+            )
+            return {"qa_verdict": None, "critique_attempts": 0, "pending_feedback": None}
         adaptado: AdaptedScript = state["adapted_script"]
         borrador: ScriptDraft = state["draft_script"]
         texto = " ".join(
@@ -255,6 +281,14 @@ def build_pipeline_graph(
         """Visual/Audio Director: traduce el guion aprobado a specs técnicas."""
         plan, capitulo, _ = _current_chapter(state)
         borrador: ScriptDraft = state["draft_script"]
+        if not project.agente_activo(ROLE_DIRECTOR):
+            logger.info("Director técnico desactivado: %s sin specs visuales.", capitulo.chapter_id)
+            audit.log_step(
+                "technical_director",
+                f"Agente desactivado en el proyecto: {capitulo.chapter_id} "
+                "avanza sin paquete técnico.",
+            )
+            return {"technical_package": None}
         mensaje = director_prompts.build_user_message(
             project,
             chapter=capitulo,

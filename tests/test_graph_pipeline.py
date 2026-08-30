@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 
 from sinnema.application.graph import build_pipeline_graph
+from sinnema.application.projects import AgentConfig
 from sinnema.application.requests import build_initial_state
 from sinnema.application.settings import PipelineSettings
 from sinnema.domain.exceptions import DomainValidationError
@@ -22,6 +23,7 @@ from conftest import (
     make_draft,
     make_package,
     make_plan,
+    make_project,
     make_request,
 )
 
@@ -148,3 +150,76 @@ def test_paquete_desalineado_falla_la_ejecucion():
 
     with pytest.raises(DomainValidationError, match="no cubre exactamente"):
         ejecutar_grafo(gw, request=make_request(num_chapters=1))
+
+
+# --------------------- Agentes desactivados por proyecto ---------------------
+
+
+def _proyecto_con_agentes(**agentes):
+    return make_project(agentes=agentes)
+
+
+def test_continuidad_desactivada_avanza_sin_directivas_y_extrae_lore_de_conceptos():
+    proyecto = _proyecto_con_agentes(continuity=AgentConfig(activo=False))
+    gw = gateway_con_serie(num_chapters=2)
+    final = ejecutar_grafo(gw, request=make_request(project=proyecto))
+
+    assert gw.calls.count("continuity") == 0
+    assert gw.calls.count("scriptwriter") == 2  # el guionista tolera directivas None
+    # El lore sigue creciendo: 2 conceptos clave por capítulo.
+    assert len(final["lore_entries"]) == 4
+    assert len(final["completed_episodes"]) == 2
+
+
+def test_adapter_desactivado_pasa_el_borrador_con_adaptacion_identidad():
+    proyecto = _proyecto_con_agentes(adapter=AgentConfig(activo=False))
+    gw = gateway_con_serie(num_chapters=2)
+    final = ejecutar_grafo(gw, request=make_request(project=proyecto))
+
+    assert gw.calls.count("adapter") == 0
+    episodios = final["completed_episodes"]
+    # Adaptación identidad: el título del episodio es el del borrador original.
+    assert all(e.title == "Título de prueba del borrador" for e in episodios)
+    assert all(e.audit.approved for e in episodios)  # el crítico audita igual
+
+
+def test_critico_desactivado_aprueba_sin_dictamen_y_sin_ciclo_de_critica():
+    proyecto = _proyecto_con_agentes(critic=AgentConfig(activo=False))
+    gw = gateway_con_serie(num_chapters=2)
+    final = ejecutar_grafo(gw, request=make_request(project=proyecto))
+
+    assert gw.calls.count("critic") == 0
+    # Sin crítico no hay ciclo: una sola pasada de guionista por capítulo.
+    assert gw.calls.count("scriptwriter") == 2
+    episodios = final["completed_episodes"]
+    assert all(e.audit is None for e in episodios)
+    assert all(not e.forced_acceptance for e in episodios)
+
+
+def test_director_tecnico_desactivado_entrega_episodios_sin_specs_visuales():
+    proyecto = _proyecto_con_agentes(technical_director=AgentConfig(activo=False))
+    gw = gateway_con_serie(num_chapters=2)
+    final = ejecutar_grafo(gw, request=make_request(project=proyecto))
+
+    assert gw.calls.count("technical_director") == 0
+    episodios = final["completed_episodes"]
+    assert all(e.technical is None for e in episodios)
+    assert all(s.image_prompt == "" for e in episodios for s in e.scenes)
+
+
+def test_pipeline_minimo_solo_planner_y_guionista():
+    """Los cuatro roles opcionales apagados: queda la columna vertebral."""
+    proyecto = _proyecto_con_agentes(
+        continuity=AgentConfig(activo=False),
+        adapter=AgentConfig(activo=False),
+        critic=AgentConfig(activo=False),
+        technical_director=AgentConfig(activo=False),
+    )
+    gw = gateway_con_serie(num_chapters=2)
+    final = ejecutar_grafo(gw, request=make_request(project=proyecto))
+
+    roles_invocados = set(gw.calls)
+    assert roles_invocados == {"planner", "scriptwriter"}
+    assert len(final["completed_episodes"]) == 2
+    episodio = final["completed_episodes"][0]
+    assert episodio.audit is None and episodio.technical is None
