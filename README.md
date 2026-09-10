@@ -802,9 +802,10 @@ La web de gestión edita los mismos `proyectos/<id>.toml` que lee el pipeline
 (escritura atómica con `tomli-w`). Cada job carga el spec vigente desde disco
 al arrancar: cambiar un proyecto —su flujo, su alcance o sus agentes custom—
 aplica a la próxima corrida, sin reiniciar. Las specs completas están en
-[`docs/spec-gestion-web.md`](docs/spec-gestion-web.md) y
-[`docs/spec-agentes-dinamicos.md`](docs/spec-agentes-dinamicos.md); lo
-esencial del esquema:
+[`docs/spec-gestion-web.md`](docs/spec-gestion-web.md),
+[`docs/spec-agentes-dinamicos.md`](docs/spec-agentes-dinamicos.md) y
+[`docs/spec-red-3d.md`](docs/spec-red-3d.md) (monitor 3D de la red de
+agentes, propuesta); lo esencial del esquema:
 
 ```toml
 [agentes.scriptwriter]          # planner, continuity, scriptwriter, adapter,
