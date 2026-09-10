@@ -425,6 +425,234 @@ def test_flujo_efectivo_expone_los_agentes_custom(gestion):
     }]
 
 
+# --------------------- /red: red efectiva (spec-red-3d §5.1) ---------------------
+
+
+def _ids_de_mermaid(mermaid: str) -> set:
+    """Ids de nodo declarados en el diagrama Mermaid de langgraph."""
+    import re
+
+    ids = set()
+    for linea in mermaid.splitlines():
+        m = re.match(r"^\t([A-Za-z0-9_]+)\(", linea)
+        if m:
+            ids.add(m.group(1))
+    return ids
+
+
+def test_red_del_proyecto_por_defecto(cliente):
+    client, _ = cliente
+    res = client.get("/api/projects/educativo/red")
+    assert res.status_code == 200
+    cuerpo = res.json()
+    assert cuerpo["project_id"] == "educativo"
+    assert cuerpo["declarado"] is False  # sin [flujo]: semántica legacy
+    assert cuerpo["hasta"] == "produccion"
+    assert cuerpo["limite_recursion"] > 0
+
+    nodos = {n["id"]: n for n in cuerpo["nodes"]}
+    assert set(nodos) == {
+        "plan_series", "continuity_master", "scriptwriter", "persona_adapter",
+        "chief_critic", "technical_director", "commit_episode", "fail_chapter",
+    }
+    # Anotación de registro: fase/tipo/estructural/esencial (§5.1).
+    assert nodos["plan_series"]["rol"] == "planner"
+    assert nodos["plan_series"]["fase"] == "serie"
+    assert nodos["plan_series"]["estructural"] is True
+    assert nodos["plan_series"]["esencial"] is True
+    assert nodos["continuity_master"]["fase"] == "contexto"
+    assert nodos["continuity_master"]["estructural"] is False
+    assert nodos["persona_adapter"]["fase"] == "transformacion"
+    assert nodos["chief_critic"]["fase"] == "compuerta"
+    assert nodos["chief_critic"]["estructural"] is True
+    assert nodos["technical_director"]["fase"] == "enriquecimiento"
+    # Cierre: estructural, sin agente ni LLM.
+    for cierre in ("commit_episode", "fail_chapter"):
+        assert nodos[cierre]["tipo"] == "cierre"
+        assert nodos[cierre]["fase"] == "cierre"
+        assert nodos[cierre]["estructural"] is True
+        assert nodos[cierre]["rol"] is None
+        assert nodos[cierre]["llm"] is None
+        assert nodos[cierre]["descripcion"]
+
+    # LLMConfig resuelto por rol (registro, sin overrides): sin top_p/max_tokens.
+    llm = nodos["scriptwriter"]["llm"]
+    assert llm == {
+        "proveedor": "openai", "modelo": "gpt-4o",
+        "temperatura": 0.8, "tools": [],
+    }
+
+    aristas = {e["id"]: e for e in cuerpo["edges"]}
+    assert "__start__->plan_series" in aristas
+    assert "commit_episode->__end__" in aristas
+    assert aristas["plan_series->continuity_master"]["condicional"] is False
+    assert aristas["plan_series->continuity_master"]["labels"] == []
+    # El ciclo de crítica con sus labels condicionales.
+    assert aristas["chief_critic->scriptwriter"]["condicional"] is True
+    assert aristas["chief_critic->scriptwriter"]["labels"] == ["revise"]
+    assert aristas["chief_critic->fail_chapter"]["labels"] == ["skip_chapter"]
+    assert aristas["commit_episode->__end__"]["labels"] == ["series_complete"]
+    assert aristas["commit_episode->continuity_master"]["labels"] == ["next_chapter"]
+
+
+def test_red_coincide_en_nodos_con_el_mermaid_por_proyecto_empaquetado(cliente):
+    """Criterio de aceptación de la fase: /red == Mermaid de flujo-efectivo."""
+    client, _ = cliente
+    proyectos = [p["project_id"] for p in client.get("/api/projects").json()]
+    assert len(proyectos) >= 5  # los shows empaquetados del repo
+    for pid in proyectos:
+        red = client.get(f"/api/projects/{pid}/red").json()
+        mermaid = client.get(f"/api/projects/{pid}/flujo-efectivo").json()["mermaid"]
+        ids_mermaid = _ids_de_mermaid(mermaid) - {"__start__", "__end__"}
+        assert {n["id"] for n in red["nodes"]} == ids_mermaid, pid
+        # Toda arista conecta nodos (o anclas) de la misma red.
+        for arista in red["edges"]:
+            extremos = {arista["from"], arista["to"]} - {"__start__", "__end__"}
+            assert extremos <= ids_mermaid, (pid, arista)
+
+
+def test_red_de_proyecto_inexistente_es_404(cliente):
+    client, _ = cliente
+    assert client.get("/api/projects/no-existe/red").status_code == 404
+
+
+def test_red_refleja_los_overrides_llm_del_proyecto(gestion):
+    """[agentes.<rol>] llega resuelto a la escena: proyecto > default."""
+    client, _, _, _ = gestion
+    client.post("/api/projects", json=_proyecto_json(
+        flujo={"contexto": ["continuity"], "revisor": "critic"},
+        agentes={
+            "scriptwriter": {
+                "proveedor": "ollama", "modelo": "llama3.1", "temperatura": 0.5,
+                "top_p": 0.9, "max_tokens": 4096, "tools": ["buscar_lore"],
+            },
+        },
+    ))
+    red = client.get("/api/projects/mi-show/red").json()
+    llm = next(n["llm"] for n in red["nodes"] if n["id"] == "scriptwriter")
+    assert llm == {
+        "proveedor": "ollama", "modelo": "llama3.1", "temperatura": 0.5,
+        "top_p": 0.9, "max_tokens": 4096, "tools": ["buscar_lore"],
+    }
+
+
+def test_red_con_agente_custom(gestion):
+    client, _, _, _ = gestion
+    client.post("/api/projects", json=_proyecto_json(
+        flujo={"contexto": ["fact_checker"], "revisor": "critic"},
+        agentes={
+            "fact_checker": {
+                "tipo": "contexto", "contrato": "notas",
+                "entradas": ["capitulo", "lore"],
+                "instrucciones": "Verifica los datos de {marca}.",
+                "top_p": 0.5,
+            },
+        },
+    ))
+    red = client.get("/api/projects/mi-show/red").json()
+    nodos = {n["id"]: n for n in red["nodes"]}
+    assert "fact_checker" in nodos  # el nodo del custom es su rol
+    custom = nodos["fact_checker"]
+    assert custom["fase"] == "contexto"
+    assert custom["tipo"] == "contexto"
+    assert custom["estructural"] is False
+    assert custom["custom"] == {
+        "contrato": "notas",
+        "entradas": ["capitulo", "lore"],
+        "instrucciones": "Verifica los datos de {marca}.",
+    }
+    # LLM del custom: default genérico (gpt-4o-mini) con el top_p del proyecto.
+    assert custom["llm"]["modelo"] == "gpt-4o-mini"
+    assert custom["llm"]["top_p"] == 0.5
+    assert "__start__->plan_series" in {e["id"] for e in red["edges"]}
+
+
+def test_red_con_hasta_plan_cierra_sin_bucle_de_capitulos(gestion):
+    client, _, _, _ = gestion
+    client.post("/api/projects", json=_proyecto_json(
+        flujo={"contexto": ["continuity"], "hasta": "plan"},
+    ))
+    red = client.get("/api/projects/mi-show/red").json()
+    assert red["hasta"] == "plan"
+    nodos = {n["id"]: n for n in red["nodes"]}
+    assert set(nodos) == {"plan_series", "consolidar_plan"}
+    assert nodos["consolidar_plan"]["tipo"] == "cierre"
+    assert nodos["consolidar_plan"]["llm"] is None
+    ids_aristas = {e["id"] for e in red["edges"]}
+    assert ids_aristas == {
+        "__start__->plan_series",
+        "plan_series->consolidar_plan",
+        "consolidar_plan->__end__",
+    }
+
+
+# ------------------------ /api/meta/catalogos (spec §5) ------------------------
+
+
+def test_meta_catalogos_para_los_formularios(cliente):
+    client, _ = cliente
+    cuerpo = client.get("/api/meta/catalogos").json()
+    assert cuerpo["proveedores"] == ["anthropic", "openai", "google", "ollama"]
+    # Modelos sugeridos: los que usan los defaults del sistema, por proveedor.
+    assert "gpt-4o" in cuerpo["modelos"]["openai"]
+    assert "gpt-4o-mini" in cuerpo["modelos"]["openai"]
+    assert cuerpo["modelos"]["anthropic"] == ["claude-3-5-sonnet-latest"]
+    assert cuerpo["modelos"]["google"] == ["gemini-1.5-pro"]
+    assert cuerpo["modelos"]["ollama"] == []
+    # Tools integradas con descripción (lo que el modelo ve del catálogo).
+    tools = {t["nombre"]: t["descripcion"] for t in cuerpo["tools"]}
+    assert set(tools) == {"buscar_lore", "leer_formato"}
+    assert all(tools.values())
+    assert cuerpo["hitos"] == [
+        "plan", "guion", "guion_final", "auditado", "produccion",
+    ]
+    assert cuerpo["tipos_custom"] == ["contexto", "enriquecedor", "revisor"]
+    assert set(cuerpo["contratos"]) == {"notas", "texto", "dictamen"}
+    assert set(cuerpo["entradas_custom"]) == {
+        "capitulo", "guion", "lore", "plan", "directivas",
+    }
+
+
+# ------------- Round-trip de la config LLM por PUT/GET (spec §14) -------------
+
+
+def test_config_llm_hace_round_trip_por_put_y_get(gestion):
+    """Criterio de aceptación: top_p/max_tokens/tools persisten en el TOML."""
+    client, _, _, _ = gestion
+    config = {
+        "temperatura": 0.8, "top_p": 0.95, "max_tokens": 4096,
+        "tools": ["buscar_lore"],
+    }
+    client.post("/api/projects", json=_proyecto_json(
+        flujo={"contexto": ["continuity"], "revisor": "critic"},
+        agentes={"scriptwriter": config},
+    ))
+    crudo = client.get("/api/projects/mi-show").json()
+    assert crudo["agentes"]["scriptwriter"] == config
+
+    # PUT del cuerpo crudo (sin la clave derivada `editable`) con mutación.
+    crudo.pop("editable")
+    crudo["agentes"]["scriptwriter"]["max_tokens"] = 8192
+    crudo["agentes"]["scriptwriter"]["tools"] = ["buscar_lore", "leer_formato"]
+    assert client.put("/api/projects/mi-show", json=crudo).status_code == 200
+
+    re_leido = client.get("/api/projects/mi-show").json()
+    assert re_leido["agentes"]["scriptwriter"]["max_tokens"] == 8192
+    assert re_leido["agentes"]["scriptwriter"]["tools"] == [
+        "buscar_lore", "leer_formato",
+    ]
+    assert re_leido["agentes"]["scriptwriter"]["top_p"] == 0.95
+
+
+def test_put_con_config_llm_invalida_es_400(gestion):
+    client, _, _, _ = gestion
+    client.post("/api/projects", json=_proyecto_json())
+    datos = _proyecto_json(agentes={"scriptwriter": {"top_p": 1.5}})
+    res = client.put("/api/projects/mi-show", json=datos)
+    assert res.status_code == 400
+    assert "top_p" in res.json()["detail"]
+
+
 def test_crear_proyecto_con_flujo_invalido_reporta_problemas(gestion):
     client, _, _, _ = gestion
     res = client.post("/api/projects", json=_proyecto_json(flujo={

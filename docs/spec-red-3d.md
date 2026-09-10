@@ -684,8 +684,14 @@ README/spec actualizados.
 
 ### Fase 1 — Config LLM completa + red como recurso
 
-1. `projects.py`: `top_p`/`max_tokens`/`tools` en `AgentConfig`, `_CLAVES_AGENTE`
-   y validaciones §3.12–13.
+> **Implementada** (2026-09-09): claves `top_p`/`max_tokens`/`tools` con
+> round-trip `PUT`/`GET` y llegada a los constructores LangChain; `/red` y
+> `/api/meta/catalogos` operativos. El vocabulario de tools integradas vive en
+> `sinnema/application/tools.py` (las implementaciones `@tool` llegan en la
+> Fase 4 y se registran contra ese catálogo).
+
+1. `projects.py`: `top_p`/`max_tokens`/`tools` en `AgentConfig`,
+   `_CLAVES_AGENTE` y validaciones §3.12–13.
 2. `providers.py`: firma extendida de `build_provider_model` (mapeo
    `num_predict` en Ollama) y propagación desde `resolve_role_spec`.
 3. `GET /api/projects/{id}/red`: derivación desde `grafo.get_graph()` con

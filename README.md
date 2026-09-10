@@ -323,7 +323,7 @@ Un proyecto (show) es un archivo TOML con seis secciones:
 | `[visual]` | estilo visual maestro (en inglés, para los modelos de imagen) |
 | `[formato]` | sobre editorial numérico — **opcional**; sin él rige el perfil por defecto (vertical ~60 s) |
 | `[flujo]` | qué agentes participan, en qué orden y **hasta dónde llega** la corrida — **opcional**; sin él rige la topología por defecto |
-| `[agentes.<rol>]` | reglas, proveedor/modelo/temperatura, activación — y, para **agentes custom**, `tipo` + `contrato` + `entradas` + `instrucciones` |
+| `[agentes.<rol>]` | reglas, proveedor/modelo/temperatura, `top_p`/`max_tokens`/`tools`, activación — y, para **agentes custom**, `tipo` + `contrato` + `entradas` + `instrucciones` |
 
 Puntos clave:
 
@@ -591,7 +591,9 @@ Mecanismos de configuración:
 
 - **Overrides por rol vía entorno:** `LLM_PROVIDER_<ROL>` y `LLM_MODEL_<ROL>`
   (p. ej. `LLM_PROVIDER_SCRIPTWRITER=ollama`).
-- **Precedencia:** proyecto (`[agentes.<rol>]`) > entorno > default.
+- **Precedencia:** proyecto (`[agentes.<rol>]`) > entorno > default. Los
+  overrides de generación (`top_p`, `max_tokens`, `tools`) solo vienen del
+  proyecto: el entorno cubre únicamente proveedor/modelo.
 - **Disponibilidad:** proveedor usable = paquete LangChain instalado +
   credenciales presentes (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
   `GOOGLE_API_KEY`/`GEMINI_API_KEY`; Ollama no requiere clave).
@@ -783,8 +785,10 @@ tema y capítulos, con el alcance del show a la vista y progreso en vivo) y
 | `DELETE /api/projects/{id}` | Borra el archivo (409 si hay jobs activos) |
 | `GET /api/projects/{id}/prompts` | Vista previa de los prompts del sistema compuestos |
 | `GET /api/projects/{id}/flujo-efectivo` | Fases resueltas, hito, agentes custom, límite de recursión y diagrama Mermaid |
+| `GET /api/projects/{id}/red` | **Red efectiva como recurso** (monitor 3D): nodos y aristas derivados del grafo compilado, anotados con el registro y el `LLMConfig` resuelto por rol |
 | `GET/DELETE /api/projects/{id}/lore` | Ver / reiniciar la memoria de continuidad |
 | `GET /api/meta/roles` | Catálogo de agentes **desde el registro** (tipo, descripción, esencial, desactivable, defaults LLM) |
+| `GET /api/meta/catalogos` | Catálogos para formularios: proveedores, modelos sugeridos, tools integradas, hitos, tipos/contratos/entradas custom |
 | `POST /api/series` | Crea un job de generación (202, devuelve `job_id`) |
 | `GET /api/jobs` | Jobs del usuario (header `X-Owner`, filtro `?project_id=`) |
 | `GET /api/jobs/{id}` | Estado, error o entregable del job |
@@ -812,6 +816,9 @@ agentes, propuesta); lo esencial del esquema:
 reglas = ["Cerrar con dato verificable"]   # critic, technical_director
 temperatura = 0.9               # opcional (0.0-2.0)
 # proveedor / modelo            # opcional: override por rol
+top_p = 0.95                    # opcional (0.0-1.0): ausente = default del proveedor
+max_tokens = 4096               # opcional (> 0): ausente = default del proveedor
+# tools = ["buscar_lore"]       # opcional: tools integradas del rol (spec-red-3d §7.3)
 
 [agentes.adapter]
 activo = false                  # desactiva el agente (planner y scriptwriter no)
@@ -825,6 +832,13 @@ activo = false                  # desactiva el agente (planner y scriptwriter no
   `REGLAS ADICIONALES DEL PROYECTO`).
 - **Proveedor/modelo/temperatura**: precedencia **proyecto > entorno > default**;
   los roles desactivados no necesitan proveedor ni clave.
+- **top_p/max_tokens**: overrides de generación opcionales; ausentes no se
+  pasan al constructor (rige el default del proveedor). Cada paquete recibe su
+  nombre nativo (`ChatOllama` usa `num_predict`, Google `max_output_tokens`).
+- **tools**: habilita tools integradas para el rol (`buscar_lore`,
+  `leer_formato`); los nombres se validan contra el catálogo
+  (`GET /api/meta/catalogos`) y el loop de ejecución llega con las fases de
+  tokens/tools de la spec 3D.
 - **Desactivar un rol** cortocircuita su nodo con el fallback determinista de
   su definición (sin llamar al LLM): `continuity` avanza sin directivas (el
   lore sigue creciendo desde los conceptos clave), `adapter` pasa el borrador

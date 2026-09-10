@@ -27,7 +27,7 @@ import asyncio
 import logging
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import uvicorn
 from fastapi import FastAPI, Header, HTTPException
@@ -41,14 +41,33 @@ from pydantic import BaseModel, Field
 
 from sinnema.application.graph import build_pipeline_graph
 from sinnema.application.ports import ROLE_PLANNER, ROLE_SCRIPTWRITER
-from sinnema.application.projects import ROLES_ESENCIALES, resolver_flujo
+from sinnema.application.projects import (
+    CONTRATOS_VALIDOS,
+    ROLES_ESENCIALES,
+    TIPOS_CUSTOM,
+    FlowSpec,
+    ProjectSpec,
+    resolver_flujo,
+)
 from sinnema.application.prompts import build_role_system_prompts
-from sinnema.application.registry import AGENT_REGISTRY, definiciones_custom
+from sinnema.application.registry import (
+    AGENT_REGISTRY,
+    CATALOGO_ENTRADAS,
+    definiciones_custom,
+    definiciones_del_proyecto,
+)
 from sinnema.application.requests import MAX_CRITIQUE_ATTEMPTS_LIMIT
+from sinnema.application.tools import TOOLS_INTEGRADAS
 from sinnema.application.use_cases import limite_de_recursion
-from sinnema.domain.constants import SERIES_MAX_CHAPTERS
+from sinnema.domain.constants import ALCANCES, SERIES_MAX_CHAPTERS
 from sinnema.infrastructure.api.viewer import render_deliverable_html
-from sinnema.infrastructure.llm.providers import DEFAULT_ROLE_SPECS
+from sinnema.infrastructure.llm.providers import (
+    DEFAULT_CUSTOM_ROLE_SPEC,
+    DEFAULT_ROLE_SPECS,
+    PROVEEDORES,
+    default_role_spec,
+    resolve_role_spec,
+)
 from sinnema.infrastructure.lore import JsonLoreStore
 from sinnema.infrastructure.projects import (
     ProjectFileStore,
@@ -83,6 +102,153 @@ class SeriesRequestBody(BaseModel):
         None, ge=1, le=MAX_CRITIQUE_ATTEMPTS_LIMIT,
         description="Vacío = default del proyecto (sección [pipeline]) o 2.",
     )
+
+
+class _GatewayNulo:
+    """Gateway que nunca genera: compila el grafo solo para derivar su forma."""
+
+    def generate(self, *_a, **_k):  # pragma: no cover
+        raise RuntimeError("El diagrama del grafo no ejecuta el pipeline.")
+
+
+# ---------------------------------------------------------------------------
+# Red efectiva (spec-red-3d §5.1): nodos + aristas del grafo compilado
+# ---------------------------------------------------------------------------
+
+#: Nodos estructurales escritos a mano en ``graph.py`` (sin agente propio).
+_CIERRE_DESCRIPCIONES = {
+    "commit_episode": (
+        "Consolida el episodio aprobado, actualiza el lore y avanza el índice "
+        "de capítulo."
+    ),
+    "fail_chapter": (
+        "Descarta el capítulo y registra el fallo tras agotar los reintentos "
+        "de QA."
+    ),
+    "consolidar_plan": (
+        "Consolida el outline de la serie (hasta = plan): corrida sin episodios."
+    ),
+}
+
+
+def _fases_del_flujo(proyecto: ProjectSpec, flujo: FlowSpec) -> Dict[str, str]:
+    """Columna del layout (§9.1) por nodo, derivada del flujo efectivo."""
+    definiciones = definiciones_del_proyecto(proyecto)
+    fases = {"plan_series": "serie"}
+    for rol in flujo.contexto:
+        fases[definiciones[rol].nodo] = "contexto"
+    fases[definiciones[ROLE_SCRIPTWRITER].nodo] = "escritura"
+    for rol in flujo.transformaciones:
+        fases[definiciones[rol].nodo] = "transformacion"
+    if flujo.revisor is not None:
+        fases[definiciones[flujo.revisor].nodo] = "compuerta"
+    for rol in flujo.enriquecimiento:
+        fases[definiciones[rol].nodo] = "enriquecimiento"
+    fases.update({nodo: "cierre" for nodo in _CIERRE_DESCRIPCIONES})
+    return fases
+
+
+def _llm_resuelto(proyecto: ProjectSpec, rol: str) -> Dict[str, Any]:
+    """LLMConfig del rol (§4): proyecto > entorno > default, con ``tools``.
+
+    ``top_p``/``max_tokens`` ausentes no viajan en el dict (default del
+    proveedor), espejo exacto de lo que ``build_provider_model`` recibirá.
+    """
+    config = proyecto.config_de_agente(rol)
+    spec = resolve_role_spec(default_role_spec(rol), config)
+    llm: Dict[str, Any] = {
+        "proveedor": spec.provider,
+        "modelo": spec.model,
+        "temperatura": spec.temperature,
+        "tools": list(config.tools),
+    }
+    if spec.top_p is not None:
+        llm["top_p"] = spec.top_p
+    if spec.max_tokens is not None:
+        llm["max_tokens"] = spec.max_tokens
+    return llm
+
+
+def _red_efectiva(proyecto: ProjectSpec) -> Dict[str, Any]:
+    """Hidratación completa de la escena 3D para un proyecto (§5.1).
+
+    La topología se deriva de ``grafo.get_graph()`` —la misma fuente que el
+    Mermaid de ``flujo-efectivo``— anotando cada nodo con su definición del
+    registro/catálogo custom y el ``LLMConfig`` resuelto por rol. El wiring
+    del grafo jamás se re-declara aquí ni en el cliente.
+    """
+    flujo = resolver_flujo(proyecto)
+    grafo = build_pipeline_graph(_GatewayNulo(), proyecto)
+    dibujo = grafo.get_graph()
+    definiciones = definiciones_del_proyecto(proyecto)
+    nodo_a_rol = {d.nodo: rol for rol, d in definiciones.items()}
+    fases = _fases_del_flujo(proyecto, flujo)
+    nodo_compuerta = definiciones[flujo.revisor].nodo if flujo.revisor else None
+
+    nodes: List[Dict[str, Any]] = []
+    for nid in dibujo.nodes:
+        if nid in ("__start__", "__end__"):
+            continue  # anclas discretas: solo aparecen como extremos de aristas
+        rol = nodo_a_rol.get(nid)
+        if rol is None:
+            nodes.append({
+                "id": nid,
+                "rol": None,
+                "tipo": "cierre",
+                "fase": fases[nid],
+                "estructural": True,
+                "descripcion": _CIERRE_DESCRIPCIONES[nid],
+                "esencial": False,
+                "llm": None,
+            })
+            continue
+        definicion = definiciones[rol]
+        config = proyecto.config_de_agente(rol)
+        node: Dict[str, Any] = {
+            "id": nid,
+            "rol": rol,
+            "tipo": definicion.tipo,
+            "fase": fases[nid],
+            "estructural": nid in ("plan_series", nodo_compuerta),
+            "descripcion": definicion.descripcion,
+            "esencial": definicion.esencial,
+            "llm": _llm_resuelto(proyecto, rol),
+        }
+        if config.es_custom:
+            node["custom"] = {
+                "contrato": config.contrato,
+                "entradas": list(config.entradas),
+                "instrucciones": config.instrucciones,
+            }
+        nodes.append(node)
+
+    edges: List[Dict[str, Any]] = []
+    por_par: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for arista in dibujo.edges:
+        par = por_par.setdefault(
+            (arista.source, arista.target), {"condicional": False, "labels": []}
+        )
+        if arista.conditional:
+            par["condicional"] = True
+            if arista.data:
+                par["labels"].append(arista.data)
+    for (origen, destino), info in por_par.items():
+        edges.append({
+            "id": f"{origen}->{destino}",
+            "from": origen,
+            "to": destino,
+            "condicional": info["condicional"],
+            "labels": info["labels"],
+        })
+
+    return {
+        "project_id": proyecto.project_id,
+        "declarado": flujo.declarado,
+        "hasta": flujo.hasta,
+        "nodes": nodes,
+        "edges": edges,
+        "limite_recursion": limite_de_recursion(flujo, 3, 2),
+    }
 
 
 def create_app(
@@ -220,11 +386,6 @@ def create_app(
         """
         proyecto = _proyecto_o_404(project_id)
         flujo = resolver_flujo(proyecto)
-
-        class _GatewayNulo:  # el diagrama nunca genera contenido
-            def generate(self, *_a, **_k):  # pragma: no cover
-                raise RuntimeError("El diagrama del grafo no ejecuta el pipeline.")
-
         grafo = build_pipeline_graph(_GatewayNulo(), proyecto)
         customs = [
             {
@@ -252,6 +413,16 @@ def create_app(
             "limite_recursion": limite_de_recursion(flujo, 3, 2),
             "mermaid": grafo.get_graph().draw_mermaid(),
         }
+
+    @app.get("/api/projects/{project_id}/red")
+    def project_red(project_id: str) -> dict:
+        """Red efectiva de agentes del proyecto (hidratación de la escena 3D).
+
+        Nodos + aristas del grafo compilado con un gateway nulo (nunca genera
+        contenido), anotados con el registro de agentes y el ``LLMConfig``
+        resuelto por rol. La derivación vive en ``_red_efectiva``.
+        """
+        return _red_efectiva(_proyecto_o_404(project_id))
 
     @app.get("/api/projects/{project_id}/lore")
     def project_lore(project_id: str) -> list[dict]:
@@ -291,6 +462,31 @@ def create_app(
                 )
             respuesta.append(item)
         return respuesta
+
+    @app.get("/api/meta/catalogos")
+    def meta_catalogos() -> dict:
+        """Catálogos para los formularios de la web (spec-red-3d §5).
+
+        Proveedores con sus modelos sugeridos (los que usan los defaults del
+        sistema), tools integradas, hitos del pipeline y el vocabulario de los
+        agentes custom (tipos, contratos, entradas).
+        """
+        modelos: Dict[str, List[str]] = {proveedor: [] for proveedor in PROVEEDORES}
+        for spec in (*DEFAULT_ROLE_SPECS, DEFAULT_CUSTOM_ROLE_SPEC):
+            if spec.model not in modelos[spec.provider]:
+                modelos[spec.provider].append(spec.model)
+        return {
+            "proveedores": list(PROVEEDORES),
+            "modelos": modelos,
+            "tools": [
+                {"nombre": tool.nombre, "descripcion": tool.descripcion}
+                for tool in TOOLS_INTEGRADAS.values()
+            ],
+            "hitos": list(ALCANCES),
+            "tipos_custom": list(TIPOS_CUSTOM),
+            "contratos": sorted(CONTRATOS_VALIDOS),
+            "entradas_custom": sorted(CATALOGO_ENTRADAS),
+        }
 
     @app.post("/api/series", status_code=202)
     def create_series(cuerpo: SeriesRequestBody, x_owner: Optional[str] = Header(None)) -> dict:

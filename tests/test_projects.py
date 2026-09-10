@@ -205,6 +205,69 @@ def test_from_dict_reporta_varios_problemas_de_agentes_a_la_vez():
     assert "temperatura" in mensaje
 
 
+def test_from_dict_con_config_llm_extendida():
+    """top_p/max_tokens/tools (spec-red-3d §3): opcionales, con round-trip."""
+    datos = _toml_minimo()
+    datos["agentes"] = {
+        "scriptwriter": {
+            "temperatura": 0.8,
+            "top_p": 0.95,
+            "max_tokens": 4096,
+            "tools": ["buscar_lore"],
+        },
+    }
+    cfg = project_from_dict(datos).config_de_agente("scriptwriter")
+    assert cfg.top_p == 0.95
+    assert cfg.max_tokens == 4096
+    assert cfg.tools == ("buscar_lore",)
+    # Sin claves declaradas nada viaja: defaults del proveedor, sin tools.
+    vacia = project_from_dict(_toml_minimo()).config_de_agente("critic")
+    assert vacia.top_p is None and vacia.max_tokens is None and vacia.tools == ()
+
+
+@pytest.mark.parametrize(
+    "config_mala, fragmento",
+    [
+        ({"top_p": -0.1}, "top_p debe estar entre 0.0 y 1.0"),
+        ({"top_p": 1.5}, "top_p debe estar entre 0.0 y 1.0"),
+        ({"max_tokens": 0}, "max_tokens debe ser mayor que 0"),
+        ({"max_tokens": -64}, "max_tokens debe ser mayor que 0"),
+        ({"tools": ["navegar"]}, "tools desconocidas: navegar"),
+    ],
+)
+def test_from_dict_rechaza_config_llm_invalida(config_mala, fragmento):
+    datos = _toml_minimo()
+    datos["agentes"] = {"scriptwriter": config_mala}
+    with pytest.raises(ValueError, match=fragmento):
+        project_from_dict(datos)
+
+
+@pytest.mark.parametrize(
+    "config_mala, fragmento",
+    [
+        ({"top_p": "alto"}, "top_p' en \\[agentes.scriptwriter\\] debe ser numérica"),
+        ({"max_tokens": 12.5}, "debe ser entero"),
+        ({"tools": "buscar_lore"}, "debe ser una lista"),
+    ],
+)
+def test_from_dict_rechaza_tipos_toml_de_config_llm(config_mala, fragmento):
+    datos = _toml_minimo()
+    datos["agentes"] = {"scriptwriter": config_mala}
+    with pytest.raises(ValueError, match=fragmento):
+        project_from_dict(datos)
+
+
+def test_error_de_tools_lista_las_disponibles():
+    datos = _toml_minimo()
+    datos["agentes"] = {"critic": {"tools": ["volar", "nadar"]}}
+    with pytest.raises(ValueError) as excinfo:
+        project_from_dict(datos)
+    mensaje = str(excinfo.value)
+    assert "volar, nadar" in mensaje
+    assert "buscar_lore" in mensaje  # la lista disponible, accionable
+    assert "leer_formato" in mensaje
+
+
 def test_from_dict_con_pipeline_completo():
     datos = _toml_minimo()
     datos["pipeline"] = {
