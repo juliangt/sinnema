@@ -1,0 +1,35 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Tema oscuro único de la UI 3D (variables que mapea tailwind.config.js). */
+@layer base {
+  :root {
+    --fondo: 222 47% 7%;
+    --panel: 222 38% 11%;
+    --panel-alto: 222 33% 16%;
+    --borde: 218 27% 20%;
+    --texto: 213 40% 96%;
+    --texto-suave: 217 15% 62%;
+    --acento: 199 89% 48%;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background: hsl(var(--fondo));
+    color: hsl(var(--texto));
+    font-family:
+      ui-sans-serif,
+      system-ui,
+      -apple-system,
+      'Segoe UI',
+      sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+}
