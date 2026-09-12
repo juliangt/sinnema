@@ -662,7 +662,7 @@ calculado sobre el flujo efectivo del proyecto.
 ```text
 ├── main.py                        # punto de entrada delgado
 ├── proyectos/                     # un <id>.toml por show (datos, no código)
-├── docs/                          # specs: gestión web, agentes dinámicos, red 3D
+├── docs/                          # specs: gestión web, agentes dinámicos, red 3D, recursos ancla
 ├── web/                           # UI 3D (React Three Fiber + Vite + TS); build en web/dist
 ├── scripts/
 │   └── ver_grafo.py               # diagrama Mermaid del grafo + stream en vivo
