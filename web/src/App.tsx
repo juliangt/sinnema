@@ -6,6 +6,7 @@ import { useProjectNetwork } from './hooks/useProjectNetwork'
 import { SceneCanvas } from './scene/SceneCanvas'
 import { TopBar } from './overlay/TopBar'
 import { InspectorPanel } from './overlay/InspectorPanel'
+import { EjecucionPanel } from './overlay/EjecucionPanel'
 
 export default function App() {
   const proyectoActivo = useProjectStore((s) => s.proyectoActivo)
@@ -31,6 +32,7 @@ export default function App() {
       <SceneCanvas />
       <TopBar />
       <InspectorPanel />
+      <EjecucionPanel />
       {cargando && (
         <div className="pointer-events-none absolute inset-x-0 top-16 z-10 flex justify-center">
           <span className="rounded-full border border-borde bg-panel/90 px-4 py-1 text-xs text-texto-suave">
