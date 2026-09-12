@@ -62,6 +62,7 @@ from sinnema.application.tools import TOOLS_INTEGRADAS
 from sinnema.application.use_cases import limite_de_recursion
 from sinnema.domain.constants import ALCANCES, SERIES_MAX_CHAPTERS
 from sinnema.infrastructure.api.viewer import render_deliverable_html
+from sinnema.infrastructure.anclas import JsonAnchorStore
 from sinnema.infrastructure.llm.providers import (
     DEFAULT_CUSTOM_ROLE_SPEC,
     DEFAULT_ROLE_SPECS,
@@ -291,6 +292,9 @@ def create_app(
         spec_reader=project_store.read_raw,
     )
     lore_store = JsonLoreStore(root=data_dir / "continuidad")
+    # Biblioteca de recursos ancla bajo el mismo raíz de datos (spec-recursos-
+    # ancla §4.2); la API CRUD sobre ella llega en la Fase 1.
+    anchor_store = JsonAnchorStore(root=data_dir / "anclas")
     worker.start()
 
     app = FastAPI(title="Sinnema", version="0.1.0",
