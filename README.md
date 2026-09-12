@@ -11,7 +11,7 @@ de producción y consolida todo** en un entregable JSON listo para render — co
 memoria de continuidad persistente entre corridas y una pista de auditoría de
 cada ejecución.
 
-- **Stack:** Python ≥ 3.11 · Pydantic v2 · LangGraph · LangChain · FastAPI (servicio web)
+- **Stack:** Python ≥ 3.11 · Pydantic v2 · LangGraph · LangChain · FastAPI (servicio web) · React Three Fiber (UI 3D)
 - **Proveedores LLM:** Anthropic (Claude), OpenAI (GPT-4o), Google (Gemini) y Ollama local, con fallback entre proveedores
 - **Garantía central:** ningún artefacto generado por un LLM circula por el pipeline sin pasar por contratos de dominio validados
 - **Agentes dinámicos:** la composición del pipeline es dato, no código — cada show elige sus agentes de un registro declarativo, puede definir agentes nuevos 100% en configuración y cortar la corrida en el hito que necesite
@@ -563,6 +563,9 @@ con:
   `solicitud`, registra el **flujo efectivo** (cadena de roles) y el
   **alcance** de la corrida; cada nodo de agente loguea bajo su rol/nodo
   estable.
+- `NNN_<nodo>_prompts.txt`: los prompts (sistema y usuario) que recibió cada
+  paso de agente, numerados de modo que quedan **emparejados con su paso** de
+  artefacto; la API los re-serve parseados en `/api/jobs/{id}/artifacts`.
 
 La auditoría es un **observador puro**: nunca altera el resultado ni puede
 tumbar una ejecución; si el sistema de archivos falla, se desactiva con un
@@ -687,14 +690,15 @@ calculado sobre el flujo efectivo del proyecto.
 │   │   ├── projects.py            #   ProjectSpec, AgentConfig, FlowSpec, resolver_flujo
 │   │   ├── requests.py            #   SeriesRequest + estado inicial
 │   │   ├── settings.py            #   PipelineSettings (ciclo de crítica)
+│   │   ├── tools.py               #   vocabulario de tools integradas (buscar_lore, leer_formato)
 │   │   └── prompts/               #   system/user prompts por rol (+ CustomPrompts)
 │   └── infrastructure/            # adaptadores concretos
 │       ├── cli/main.py            #   CLI + composition root
-│       ├── llm/                   #   gateway LangChain + resolución de proveedores
+│       ├── llm/                   #   gateway LangChain + proveedores + tools integradas
 │       ├── projects/              #   descubrimiento, carga y escritura de TOML
 │       ├── lore/store.py          #   JsonLoreStore (LoreStorePort)
 │       ├── audit/filesystem.py    #   FilesystemAuditTrail (AuditTrailPort)
-│       ├── api/                   #   servicio web FastAPI, UI estática y visor HTML
+│       ├── api/                   #   servicio web FastAPI (sirve el build de web/), visor HTML
 │       └── runtime/               #   jobs SQLite + SeriesWorker + checkpointer
 └── tests/                         # una suite por capa, sin red
 ```
@@ -722,6 +726,12 @@ La suite (≈425 tests backend + 27 vitest frontend, en CI) cubre cada capa de f
   lore, pista de auditoría, cargador/almacén de proyectos, jobs/worker,
   API (CRUD con flujo, `flujo-efectivo`, `meta/roles`), visor, CLI de punta a
   punta con puertos nulos y el script `ver_grafo`.
+- **Frontend (`web/`):** parsers SSE (cortes de paquete, CRLF, formato
+  legacy), layout y dispose de la escena 3D, `executionStore` (suscripciones
+  transitorias) y validaciones de formularios extraídas a funciones puras.
+
+Un workflow de GitHub Actions (`.github/workflows/ci.yml`) corre en cada PR
+la suite backend (`pytest`) y el frontend (`eslint` + `vitest` + `build`).
 
 La regla de dependencias hexagonal es lo que hace esto posible: el núcleo se
 testea con dobles porque solo conoce puertos.
@@ -772,10 +782,11 @@ sinnema-server                 # http://127.0.0.1:8000
 #### UI 3D: monitor de la red de agentes (`web/`)
 
 El frontend 3D (`web/`: React Three Fiber + Vite + TypeScript + Tailwind,
-spec `docs/spec-red-3d.md`) es la UI del servicio: `GET /` sirve el build
-`web/dist` y, sin build JS, una página que indica cómo generarlo (la web
-legacy de `static/` fue reemplazada al completar la lista de paridad
-§12.3 de la spec).
+spec `docs/spec-red-3d.md`, implementado) es la UI del servicio **y a la vez
+la web de gestión de proyectos y agentes**: `GET /` sirve el build `web/dist`
+y, sin build JS, una página que indica cómo generarlo (la web legacy de
+`static/` fue reemplazada al completar la lista de paridad §12.3 de la
+spec).
 
 ```bash
 cd web
@@ -790,12 +801,29 @@ Sin build JS la API sigue completa (`/docs`), y la wheel no empaqueta
 `web/`. El recorrido de verificación de punta a punta está documentado en
 [`docs/e2e-red-3d.md`](docs/e2e-red-3d.md).
 
-La web (servida en `/`) tiene tres pestañas: **Proyectos** (crear, editar,
-duplicar, eliminar, ver prompts compuestos y lore; **editor de flujo** por
-fases con selector de alcance, **formulario de agentes custom** y **vista del
-grafo** con el Mermaid del flujo efectivo), **Generar serie** (elegir show,
-tema y capítulos, con el alcance del show a la vista y progreso en vivo) y
-**Trabajos** (jobs con estado y enlaces al visor). La API:
+Sobre la escena 3D —nodos por agente y estructurales, aristas con flechas y
+condicionales, pulsos dirigidos por eventos y flujo ambiental, cámara con
+lerp— conviven cuatro superficies de gestión:
+
+- **Barra superior:** cambio de proyecto (switcher) y contexto de la red
+  activa.
+- **Drawer de proyectos:** CRUD completo (crear, editar, duplicar, eliminar),
+  **alta y baja de agentes custom**, lore (ver/reiniciar), vista previa de
+  los prompts compuestos y enlaces al visor de series.
+- **Inspector** (click en un nodo del grafo): pestaña **Agente** (formulario
+  LLM del rol — reglas, proveedor/modelo/temperatura, `top_p`/`max_tokens`/
+  `tools` — con validaciones espejo del backend que guardan el TOML completo
+  y avisan que aplica a la próxima corrida), pestaña **Estado** (inspección
+  en vivo del job activo: artefactos y prompts por paso, scratchpad de
+  tools, stream de tokens del nodo y diff de claves que actualizó cada
+  `node_end`) y pestaña **Flujo** (editor de `[flujo]` por fases con
+  selector de alcance y validaciones espejo).
+- **Panel de ejecución:** lanzar la corrida del proyecto activo, elegir qué
+  job seguir y timeline 2D del progreso en vivo vía SSE
+  (`node_start`/`node_end`, tokens, `tool_start`/`tool_end`), con aviso de
+  **spec desfasado** si el proyecto cambió durante la corrida.
+
+La API:
 
 | Endpoint | Qué hace |
 |---|---|
@@ -815,6 +843,8 @@ tema y capítulos, con el alcance del show a la vista y progreso en vivo) y
 | `GET /api/jobs` | Jobs del usuario (header `X-Owner`, filtro `?project_id=`) |
 | `GET /api/jobs/{id}` | Estado, error o entregable del job |
 | `GET /api/jobs/{id}/events` | Progreso en vivo (Server-Sent Events) |
+| `GET /api/jobs/{id}/events/history` | Historial de eventos ya emitidos (`?since=` para retomar donde quedó el stream) |
+| `GET /api/jobs/{id}/artifacts` | Pasos del job parseados de la auditoría: resumen, artefacto JSON y prompts (`/artifacts/{n}` devuelve un paso) |
 | `GET /api/jobs/{id}/deliverable` | JSON del `SeriesDeliverable` |
 | `GET /api/jobs/{id}/viewer` | Visor HTML de la serie — con badge de **alcance** y **adjuntos** por episodio como acordeones JSON |
 
@@ -831,7 +861,7 @@ aplica a la próxima corrida, sin reiniciar. Las specs completas están en
 [`docs/spec-gestion-web.md`](docs/spec-gestion-web.md),
 [`docs/spec-agentes-dinamicos.md`](docs/spec-agentes-dinamicos.md) y
 [`docs/spec-red-3d.md`](docs/spec-red-3d.md) (monitor 3D de la red de
-agentes, propuesta); lo esencial del esquema:
+agentes, implementado); lo esencial del esquema:
 
 ```toml
 [agentes.scriptwriter]          # planner, continuity, scriptwriter, adapter,
@@ -859,8 +889,10 @@ activo = false                  # desactiva el agente (planner y scriptwriter no
   nombre nativo (`ChatOllama` usa `num_predict`, Google `max_output_tokens`).
 - **tools**: habilita tools integradas para el rol (`buscar_lore`,
   `leer_formato`); los nombres se validan contra el catálogo
-  (`GET /api/meta/catalogos`) y el loop de ejecución llega con las fases de
-  tokens/tools de la spec 3D.
+  (`GET /api/meta/catalogos`). En ejecución, el gateway corre un loop
+  `bind_tools` con guard de iteraciones y emite eventos
+  `tool_start`/`tool_end`; el materializador vive en
+  `infrastructure/llm/tools.py` (@tool LangChain sobre los puertos).
 - **Desactivar un rol** cortocircuita su nodo con el fallback determinista de
   su definición (sin llamar al LLM): `continuity` avanza sin directivas (el
   lore sigue creciendo desde los conceptos clave), `adapter` pasa el borrador
@@ -886,6 +918,11 @@ activo = false                  # desactiva el agente (planner y scriptwriter no
   estables (los históricos se congelaron en el registro), y cada job congela
   flujo+alcance al arrancar: reanudar un thread tras cambiar el flujo del
   proyecto queda fuera de garantía.
+- Cada job emite **eventos de ejecución** (`node_start`/`node_end`,
+  tokens en streaming, `tool_start`/`tool_end`) a través de un `on_event`
+  opcional del puerto de generación; el gateway hace `stream` con fallback a
+  `invoke` y los eventos se persisten en SQLite (`job_events`), de donde el
+  SSE y el endpoint de historial (`?since=`) los sirven a la UI.
 - Para escalar horizontalmente se reemplaza la cola por un broker
   (Celery/RQ/SQS) y el hilo por workers separados: `SeriesWorker` ya aísla
   store, gateway, auditoría, lore y checkpointer, y el núcleo no cambia.
