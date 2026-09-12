@@ -867,3 +867,87 @@ def test_prompts_del_paso_llegan_al_detalle(cliente, tmp_path):
     detalle = client.get(f"/api/jobs/{job_id}/artifacts/{paso_plan['n']}").json()
     assert detalle["prompts"] == contenido
     assert detalle["artefacto"] is not None
+
+
+# --------------------- Cobertura §13 restante (Fase 8a) ---------------------
+
+
+def test_historia_eventos_con_since(cliente):
+    """GET /events/history?since= devuelve solo los posteriores al id."""
+    client, store = cliente
+    res = client.post("/api/series", json={
+        "project_id": "educativo", "topic": "Fotosíntesis", "num_chapters": 2,
+    }, headers={"X-Owner": "ana"})
+    job_id = res.json()["job_id"]
+    esperar(store, job_id)
+
+    completa = client.get(f"/api/jobs/{job_id}/events/history").json()
+    assert len(completa) > 2
+    eventos_store = store.events_since(job_id)
+    desde = eventos_store[len(eventos_store) // 2].id
+    parcial = client.get(f"/api/jobs/{job_id}/events/history?since={desde}").json()
+    assert 0 < len(parcial) < len(completa)
+
+
+def test_spec_desfasado_en_listado_de_jobs(cliente):
+    """GET /api/jobs (lista) también expone spec_desfasado para running."""
+    client, store = cliente
+    job = store.create_job(owner="ana", project_id="comida", topic="Asado",
+                           num_chapters=1, max_critique_attempts=2)
+    store.set_status(job.job_id, JobStatus.RUNNING)
+    store.set_spec_fingerprint(job.job_id, "huella-vieja")
+
+    lista = client.get("/api/jobs", headers={"X-Owner": "ana"}).json()
+    objetivo = next(j for j in lista if j["job_id"] == job.job_id)
+    assert objetivo["spec_desfasado"] is True
+
+
+def test_worker_publica_tool_start_y_tool_end(tmp_path):
+    """El stream del job con tools termina en job_events (§13: gateway falso
+    que emite tokens/tools)."""
+    from sinnema.infrastructure.projects import load_project
+
+    class GatewayConTools:
+        def __init__(self, base):
+            self._base = base
+            self._sink = None
+
+        def __call__(self, proyecto, event_sink=None, tools=None):
+            self._sink = event_sink
+            assert tools is not None  # el runner inyecta el registro del proyecto
+            return self
+
+        def generate(self, role, schema, system_prompt, user_prompt, *, on_event=None):
+            if self._sink is not None and role == "scriptwriter":
+                self._sink(role, {"tipo": "tool_start", "tool": "buscar_lore",
+                                  "args": {"consulta": "fotosíntesis"}})
+                self._sink(role, {"tipo": "tool_end", "tool": "buscar_lore",
+                                  "resumen": "2 entradas"})
+            return self._base.generate(role, schema, system_prompt, user_prompt)
+
+    store = SqliteJobStore(tmp_path / "jobs.sqlite")
+    worker = SeriesWorker(
+        store,
+        checkpoint_dir=tmp_path / "checkpoints",
+        audit_root=tmp_path / "auditoria",
+        lore_root=tmp_path / "continuidad",
+        gateway_factory=GatewayConTools(gateway_con_serie(num_chapters=2)),
+        project_loader=load_project,
+    )
+    worker.start()
+    job = store.create_job(owner="ana", project_id="educativo",
+                           topic="Fotosíntesis", num_chapters=2,
+                           max_critique_attempts=2)
+    worker.submit(job.job_id)
+    for _ in range(100):
+        leido = store.get_job(job.job_id)
+        if leido.status in (JobStatus.COMPLETED, JobStatus.FAILED):
+            break
+        time.sleep(0.1)
+    assert leido.status is JobStatus.COMPLETED
+
+    kinds = [e.kind for e in store.events_since(job.job_id)]
+    assert "tool_start" in kinds and "tool_end" in kinds
+    tool_end = next(e for e in store.events_since(job.job_id) if e.kind == "tool_end")
+    assert tool_end.payload["node"] == "scriptwriter"
+    assert tool_end.payload["resumen"].startswith("2 entradas")
