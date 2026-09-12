@@ -169,3 +169,17 @@ class JsonAnchorStore:
                 f"(recibido: '{archivo}')."
             )
         return destino
+
+    def guardar_imagen(
+        self, project_id: str, ancla_id: str, archivo: str, datos: bytes
+    ) -> Path:
+        """Escribe los bytes de una imagen de batería en su ruta validada.
+
+        La ruta pasa por ``ruta_imagen`` (anti path-traversal §14); el nombre
+        de archivo lo genera siempre el servidor (``<rol>_<n>.<ext>`` en la
+        capa API), nunca el cliente.
+        """
+        destino = self.ruta_imagen(project_id, ancla_id, archivo)
+        destino.parent.mkdir(parents=True, exist_ok=True)
+        destino.write_bytes(datos)
+        return destino

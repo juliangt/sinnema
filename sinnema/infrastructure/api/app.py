@@ -11,6 +11,11 @@ Expone el caso de uso existente como producto distribuible:
 - ``GET  /api/projects/{id}/prompts`` vista previa de prompts compuestos,
 - ``GET  /api/projects/{id}/flujo-efectivo`` fases resueltas + hito + Mermaid,
 - ``GET/DELETE /api/projects/{id}/lore`` memoria de continuidad,
+- ``GET/POST /api/projects/{id}/anclas``           biblioteca de recursos ancla,
+- ``GET/PUT/DELETE /api/projects/{id}/anclas/{a}`` detalle / editar / retirar,
+- ``POST /api/projects/{id}/anclas/{a}/imagenes``  upload a la batería,
+- ``GET  /api/projects/{id}/anclas/{a}/imagenes/{f}`` serving de la batería,
+- ``POST /api/projects/{id}/anclas/{a}/lock``      lock con batería mínima,
 - ``GET  /api/meta/roles``           catálogo de agentes para el formulario,
 - ``GET  /``                         la interfaz web (gestión + generación).
 
@@ -31,14 +36,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import uvicorn
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
     JSONResponse,
     StreamingResponse,
 )
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from sinnema.application.graph import build_pipeline_graph
 from sinnema.application.ports import ROLE_PLANNER, ROLE_SCRIPTWRITER
@@ -66,6 +71,8 @@ from sinnema.domain.models.anclas import (
     ESTADOS_DE_ANCLA,
     ROLES_POR_TIPO,
     TIPOS_DE_ANCLA,
+    RecursoAncla,
+    bateria_minima_cumplida,
 )
 from sinnema.infrastructure.api.viewer import render_deliverable_html
 from sinnema.infrastructure.anclas import JsonAnchorStore
@@ -112,6 +119,30 @@ completa.</p></body></html>"""
 DEFAULT_DATA_DIR = Path(
     os.environ.get("SINNEMA_DATA_DIR", "datos-servidor")
 )
+
+# Biblioteca de anclas (spec-recursos-ancla §9.1/§14): formatos y límite de
+# los uploads de batería. La extensión viene del upload pero solo se acepta
+# la de esta lista blanca; el content-type de serving es fijo por extensión.
+EXTENSIONES_DE_IMAGEN = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+}
+TAMANO_MAXIMO_DE_IMAGEN = 10 * 1024 * 1024  # 10 MB
+
+
+def _siguiente_archivo_de_rol(ancla: RecursoAncla, rol: str, extension: str) -> str:
+    """Nombre ``<rol>_<n>.<ext>`` con el correlativo siguiente del rol: el
+    servidor genera siempre el nombre del archivo, nunca el cliente."""
+    prefijo, n = f"{rol}_", 0
+    for imagen in ancla.bateria:
+        nombre = imagen.archivo
+        if nombre.startswith(prefijo) and nombre.endswith(extension):
+            cuerpo = nombre[len(prefijo):-len(extension)]
+            if cuerpo.isdigit():
+                n = max(n, int(cuerpo))
+    return f"{prefijo}{n + 1}{extension}"
 
 
 class SeriesRequestBody(BaseModel):
@@ -464,6 +495,253 @@ def create_app(
         _proyecto_o_404(project_id)
         lore_store.save(project_id, [])
         return {"project_id": project_id, "lore": []}
+
+    # ------------------- Anclas: biblioteca visual (§9.1) -------------------
+
+    def _biblioteca(project_id: str) -> list[RecursoAncla]:
+        try:
+            return anchor_store.load(project_id)
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    def _ancla_o_404(project_id: str, ancla_id: str) -> RecursoAncla:
+        ancla = next(
+            (a for a in _biblioteca(project_id) if a.ancla_id == ancla_id), None
+        )
+        if ancla is None:
+            raise HTTPException(
+                404, f"El proyecto '{project_id}' no tiene ancla '{ancla_id}'."
+            )
+        return ancla
+
+    def _contrato_invalido(exc: ValidationError) -> HTTPException:
+        """400 accionable: los errores de Pydantic aplanados a una línea."""
+        detalle = "; ".join(
+            f"{'.'.join(str(p) for p in error['loc']) or 'cuerpo'}: {error['msg']}"
+            for error in exc.errors()
+        )
+        return HTTPException(400, f"Contrato de ancla inválido: {detalle}.")
+
+    def _guardar(project_id: str, anclas: list[RecursoAncla]) -> None:
+        try:
+            anchor_store.save(project_id, anclas)
+        except ValueError as exc:
+            raise HTTPException(
+                409 if "duplicado" in str(exc) else 400, str(exc)
+            ) from exc
+
+    @app.get("/api/projects/{project_id}/anclas")
+    def project_anclas(project_id: str) -> list[dict]:
+        """Biblioteca de anclas del proyecto completa (batería, estado,
+        version; spec-recursos-ancla §9.1)."""
+        _proyecto_o_404(project_id)
+        return [a.model_dump(mode="json") for a in _biblioteca(project_id)]
+
+    @app.post("/api/projects/{project_id}/anclas", status_code=201)
+    def crear_ancla(project_id: str, cuerpo: dict) -> dict:
+        """Alta de un ancla, siempre en estado ``borrador``: el lock va por
+        ``POST .../lock`` y el retiro por ``DELETE`` (nunca por el cuerpo)."""
+        _proyecto_o_404(project_id)
+        datos = {
+            clave: cuerpo[clave]
+            for clave in ("ancla_id", "tipo", "nombre", "descripcion_canonica")
+            if clave in cuerpo
+        }
+        datos["estado"] = "borrador"
+        try:
+            ancla = RecursoAncla.model_validate(datos)
+        except ValidationError as exc:
+            raise _contrato_invalido(exc) from exc
+        biblioteca = _biblioteca(project_id)
+        for existente in biblioteca:
+            if existente.ancla_id == ancla.ancla_id:
+                raise HTTPException(
+                    409,
+                    f"Ya existe un ancla con id '{ancla.ancla_id}' en el "
+                    "proyecto (cada ancla necesita un slug único).",
+                )
+            if existente.nombre.casefold() == ancla.nombre.casefold():
+                raise HTTPException(
+                    409,
+                    f"Ya existe un ancla llamada '{existente.nombre}' (los "
+                    "nombres son únicos sin distinguir mayúsculas).",
+                )
+        _guardar(project_id, [*biblioteca, ancla])
+        return ancla.model_dump(mode="json")
+
+    @app.get("/api/projects/{project_id}/anclas/{ancla_id}")
+    def detalle_ancla(project_id: str, ancla_id: str) -> dict:
+        _proyecto_o_404(project_id)
+        return _ancla_o_404(project_id, ancla_id).model_dump(mode="json")
+
+    @app.put("/api/projects/{project_id}/anclas/{ancla_id}")
+    def editar_ancla(project_id: str, ancla_id: str, cuerpo: dict) -> dict:
+        """Edita ``nombre`` y ``descripcion_canonica``. Decisión de diseño: el
+        estado NO se cambia por acá (claves extra → 400) — el lock es un
+        endpoint propio con verificación de batería y el retiro es el DELETE;
+        la batería se muta con el upload de imágenes."""
+        _proyecto_o_404(project_id)
+        ancla = _ancla_o_404(project_id, ancla_id)
+        prohibidas = sorted(set(cuerpo) - {"nombre", "descripcion_canonica"})
+        if prohibidas:
+            raise HTTPException(
+                400,
+                "Solo se pueden editar 'nombre' y 'descripcion_canonica' "
+                f"(rechazadas: {', '.join(prohibidas)}); el estado se cambia "
+                "con lock/retiro y la batería con el upload de imágenes.",
+            )
+        datos = ancla.model_dump()
+        datos.update(
+            {clave: cuerpo[clave] for clave in ("nombre", "descripcion_canonica")
+             if clave in cuerpo}
+        )
+        try:
+            editada = RecursoAncla.model_validate(datos)
+        except ValidationError as exc:
+            raise _contrato_invalido(exc) from exc
+        _guardar(
+            project_id,
+            [editada if a.ancla_id == ancla_id else a
+             for a in _biblioteca(project_id)],
+        )
+        return editada.model_dump(mode="json")
+
+    @app.delete("/api/projects/{project_id}/anclas/{ancla_id}")
+    def retirar_ancla(project_id: str, ancla_id: str) -> dict:
+        """Retiro (§4.1: retirar NO borra): el registro queda con estado
+        ``retirado``, los archivos de la batería permanecen y las anclas ya
+        citadas por episodios pasados siguen resolviendo. Idempotente."""
+        _proyecto_o_404(project_id)
+        ancla = _ancla_o_404(project_id, ancla_id)
+        if ancla.estado != "retirado":
+            datos = ancla.model_dump()
+            datos["estado"] = "retirado"
+            retirada = RecursoAncla.model_validate(datos)
+            _guardar(
+                project_id,
+                [retirada if a.ancla_id == ancla_id else a
+                 for a in _biblioteca(project_id)],
+            )
+            ancla = retirada
+        return {
+            "project_id": project_id,
+            "ancla_id": ancla_id,
+            "estado": ancla.estado,
+            "retirado": True,
+        }
+
+    @app.post(
+        "/api/projects/{project_id}/anclas/{ancla_id}/imagenes", status_code=201,
+    )
+    async def subir_imagen(
+        project_id: str, ancla_id: str,
+        rol: str = Form(...), archivo: UploadFile = File(...),
+    ) -> dict:
+        """Upload multipart de una imagen a la batería (origen ``subida``).
+
+        Valida rol↔tipo (400), formato por extensión en lista blanca (400) y
+        tamaño máximo (413). El nombre ``<rol>_<n>.<ext>`` lo genera el
+        servidor con el correlativo siguiente del rol. Subir a una ancla
+        lockeada cambia la batería: el almacén sube su ``version`` (§4.1).
+        """
+        _proyecto_o_404(project_id)
+        ancla = _ancla_o_404(project_id, ancla_id)
+        if rol not in ROLES_POR_TIPO[ancla.tipo]:
+            raise HTTPException(
+                400,
+                f"El rol '{rol or 'vacío'}' no corresponde al tipo "
+                f"'{ancla.tipo}' (válidos: "
+                f"{', '.join(ROLES_POR_TIPO[ancla.tipo])}).",
+            )
+        extension = Path(archivo.filename or "").suffix.lower()
+        if extension not in EXTENSIONES_DE_IMAGEN:
+            raise HTTPException(
+                400,
+                f"Formato de imagen no soportado ('{extension or 'sin extensión'}'); "
+                f"formatos aceptados: {', '.join(sorted(EXTENSIONES_DE_IMAGEN))}.",
+            )
+        datos = await archivo.read(TAMANO_MAXIMO_DE_IMAGEN + 1)
+        if len(datos) > TAMANO_MAXIMO_DE_IMAGEN:
+            raise HTTPException(
+                413,
+                "La imagen supera el máximo de "
+                f"{TAMANO_MAXIMO_DE_IMAGEN // (1024 * 1024)} MB.",
+            )
+        nombre = _siguiente_archivo_de_rol(ancla, rol, extension)
+        try:
+            anchor_store.guardar_imagen(project_id, ancla_id, nombre, datos)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        ficha = ancla.model_dump()
+        ficha["bateria"].append(
+            {"rol": rol, "archivo": nombre, "origen": "subida"}
+        )
+        actualizada = RecursoAncla.model_validate(ficha)
+        _guardar(
+            project_id,
+            [actualizada if a.ancla_id == ancla_id else a
+             for a in _biblioteca(project_id)],
+        )
+        return actualizada.model_dump(mode="json")
+
+    @app.get("/api/projects/{project_id}/anclas/{ancla_id}/imagenes/{archivo}")
+    def servir_imagen(project_id: str, ancla_id: str, archivo: str):
+        """Serving de media de la batería (§9.1/§14): nombre plano sin
+        traversal y sin symlinks que escapen (``ruta_imagen`` del almacén),
+        solo archivos registrados en la batería, content-type fijo por
+        extensión y nombres generados por el servidor."""
+        try:
+            ancla = _ancla_o_404(project_id, ancla_id)
+            if not any(i.archivo == archivo for i in ancla.bateria):
+                raise HTTPException(
+                    404,
+                    f"La ancla '{ancla_id}' no tiene imagen '{archivo}'.",
+                )
+            media_type = EXTENSIONES_DE_IMAGEN.get(Path(archivo).suffix.lower())
+            ruta = anchor_store.ruta_imagen(project_id, ancla_id, archivo)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        if media_type is None or not ruta.is_file():
+            raise HTTPException(
+                404, f"La ancla '{ancla_id}' no tiene imagen '{archivo}'."
+            )
+        # El nombre (rol_n) nunca se re-escribe con otro contenido, así que
+        # un cache de un día es seguro.
+        return FileResponse(
+            ruta,
+            media_type=media_type,
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
+
+    @app.post("/api/projects/{project_id}/anclas/{ancla_id}/lock")
+    def lockear_ancla(project_id: str, ancla_id: str) -> dict:
+        """Lock humano (§1/§4.1): verifica la batería mínima del tipo y, si no
+        alcanza, responde 400 con los roles faltantes (error accionable). El
+        re-lock de una ancla ya lockeada es un no-op que la devuelve."""
+        _proyecto_o_404(project_id)
+        ancla = _ancla_o_404(project_id, ancla_id)
+        roles = {imagen.rol for imagen in ancla.bateria}
+        faltantes = [
+            rol for rol in BATERIA_MINIMA[ancla.tipo] if rol not in roles
+        ]
+        if not bateria_minima_cumplida(ancla.tipo, roles):
+            raise HTTPException(
+                400,
+                f"No se puede lockear '{ancla_id}': a la batería mínima de un "
+                f"'{ancla.tipo}' le faltan imágenes de rol: "
+                f"{', '.join(faltantes)} (spec-recursos-ancla §4.1).",
+            )
+        if ancla.estado != "lockeado":
+            datos = ancla.model_dump()
+            datos["estado"] = "lockeado"
+            lockeada = RecursoAncla.model_validate(datos)
+            _guardar(
+                project_id,
+                [lockeada if a.ancla_id == ancla_id else a
+                 for a in _biblioteca(project_id)],
+            )
+            ancla = lockeada
+        return ancla.model_dump(mode="json")
 
     @app.get("/api/meta/roles")
     def meta_roles() -> list[dict]:

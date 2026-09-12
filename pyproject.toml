@@ -23,6 +23,7 @@ dependencies = [
     "langgraph-checkpoint-sqlite>=2.0.0",
     "python-dotenv>=1.0.0",
     "tomli-w>=1.0,<2.0",
+    "python-multipart>=0.0.32",
 ]
 
 [project.optional-dependencies]
