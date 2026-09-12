@@ -633,6 +633,30 @@ def test_meta_catalogos_para_los_formularios(cliente):
     }
 
 
+def test_meta_catalogos_expone_los_catalogos_de_anclas(cliente):
+    """Catálogos de la biblioteca (spec-recursos-ancla §9.1): tipos, estados,
+    roles de batería por tipo y batería mínima (checklist del lock en la web)."""
+    client, _ = cliente
+    anclas = client.get("/api/meta/catalogos").json()["anclas"]
+    assert anclas["tipos"] == ["personaje", "lugar", "objeto", "estilo"]
+    assert anclas["estados"] == ["borrador", "propuesto", "lockeado", "retirado"]
+    assert anclas["roles_por_tipo"]["personaje"] == [
+        "hero_portrait", "turnaround_front", "turnaround_quarter",
+        "turnaround_side", "turnaround_back", "expression_sheet", "outfit_variant",
+    ]
+    assert anclas["roles_por_tipo"]["lugar"] == [
+        "establishing_shot", "coverage_angle", "lighting_reference",
+    ]
+    assert anclas["roles_por_tipo"]["objeto"] == ["prop_hero", "prop_detail"]
+    assert anclas["roles_por_tipo"]["estilo"] == ["style_reference"]
+    assert anclas["bateria_minima"]["personaje"] == [
+        "hero_portrait", "turnaround_front", "turnaround_side", "turnaround_back",
+    ]
+    assert anclas["bateria_minima"]["lugar"] == ["establishing_shot"]
+    assert anclas["bateria_minima"]["objeto"] == ["prop_hero"]
+    assert anclas["bateria_minima"]["estilo"] == ["style_reference"]
+
+
 # ------------- Round-trip de la config LLM por PUT/GET (spec §14) -------------
 
 

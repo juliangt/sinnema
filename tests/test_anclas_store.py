@@ -203,3 +203,36 @@ def test_null_anchor_store_es_no_op():
     store = NullAnchorStore()
     assert store.load("sinnema") == []
     assert store.save("sinnema", [make_ancla()]) is None
+
+
+# --------------------- Paridad base (criterio de Fase 0) ---------------------
+
+
+def test_proyecto_sin_anclas_produce_el_mismo_entregable_y_prompts(tmp_path):
+    """Criterio de aceptación Fase 0 (spec-recursos-ancla §13): un proyecto
+    sin anclas y sin biblioteca no cambia ni un byte de la salida."""
+    from sinnema.application.prompts import build_role_system_prompts
+    from sinnema.application.use_cases import GenerateSeriesUseCase
+
+    from conftest import gateway_con_serie, make_project, make_request
+
+    assert JsonAnchorStore(tmp_path).load("sinnema") == []  # biblioteca vacía
+
+    entregables = []
+    for anclas in (True, False):
+        use_case = GenerateSeriesUseCase(
+            gateway_con_serie(num_chapters=1), make_project(anclas=anclas)
+        )
+        entregables.append(use_case.execute(make_request(num_chapters=1)))
+
+    def _serializacion(entregable) -> str:
+        # Byte a byte salvo la marca de tiempo propia de cada corrida.
+        datos = entregable.model_dump(mode="json")
+        datos["generated_at"] = "marca-de-tiempo-normalizada"
+        return json.dumps(datos, ensure_ascii=False, sort_keys=True)
+
+    assert _serializacion(entregables[0]) == _serializacion(entregables[1])
+    # Ni los prompts compuestos cambian con el opt-out.
+    assert build_role_system_prompts(make_project(anclas=True)) == (
+        build_role_system_prompts(make_project(anclas=False))
+    )
