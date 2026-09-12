@@ -24,6 +24,7 @@ el reverse proxy / capa de despliegue.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from pathlib import Path
@@ -74,6 +75,7 @@ from sinnema.infrastructure.projects import (
     packaged_projects_dir,
     resolve_writable_projects_dir,
 )
+from sinnema.infrastructure.projects.store import fingerprint_spec
 from sinnema.infrastructure.runtime.jobs import (
     TERMINAL_STATUSES,
     Job,
@@ -278,6 +280,7 @@ def create_app(
         audit_root=data_dir / "auditoria",
         lore_root=data_dir / "continuidad",
         project_loader=project_store.load,
+        spec_reader=project_store.read_raw,
     )
     lore_store = JsonLoreStore(root=data_dir / "continuidad")
     worker.start()
@@ -519,18 +522,55 @@ def create_app(
     ) -> list[dict]:
         owner = _owner(x_owner)
         return [
-            j.to_dict(with_deliverable=False)
+            _job_dict(j)
             for j in store.list_jobs(owner, project_id=project_id)
             if j.owner == owner
         ]
 
     @app.get("/api/jobs/{job_id}")
     def get_job(job_id: str) -> dict:
-        return _job_or_404(job_id).to_dict()
+        return _job_dict(_job_or_404(job_id), with_deliverable=True)
+
+    def _job_dict(job: Job, with_deliverable: bool = False) -> dict:
+        """Forma §4 del Job, con ``spec_desfasado`` (§11.4): para jobs en
+        curso, True si el TOML cambió desde que se congeló su huella."""
+        datos = job.to_dict(with_deliverable=with_deliverable)
+        if job.status is JobStatus.RUNNING:
+            desfasado = False
+            if job.spec_fingerprint is not None:
+                try:
+                    vigente = fingerprint_spec(project_store.read_raw(job.project_id))
+                    desfasado = vigente != job.spec_fingerprint
+                except Exception:  # noqa: BLE001 - sin TOML legible no se afirma nada
+                    logger.warning(
+                        "No se pudo recalcular el fingerprint del job %s.",
+                        job.job_id, exc_info=True,
+                    )
+            datos["spec_desfasado"] = desfasado
+        return datos
+
+    @app.get("/api/jobs/{job_id}/events/history")
+    def job_events_history(job_id: str, since: int = 0) -> list[dict]:
+        """Timeline completa del job (mismos registros que el SSE, §6.3)."""
+        _job_or_404(job_id)
+        return [_evento_dict(ev) for ev in store.events_since(job_id, since)]
+
+    def _evento_dict(ev) -> dict:
+        """Forma §4 del RuntimeExecutionEvent: kind/job_id/ts + mensaje
+        legacy o payload estructurado fusionado."""
+        datos: Dict[str, Any] = {
+            "kind": ev.kind, "job_id": ev.job_id, "ts": ev.ts,
+        }
+        if ev.payload is not None:
+            datos.update(ev.payload)
+        else:
+            datos["mensaje"] = ev.message
+        return datos
 
     @app.get("/api/jobs/{job_id}/events")
     async def job_events(job_id: str) -> StreamingResponse:
-        """Progreso en vivo vía Server-Sent Events (stream de eventos JSON)."""
+        """Progreso en vivo vía Server-Sent Events (§6.3): el frame conserva
+        `id:` y `event: <kind>`; `data` es JSON con el kind y su payload."""
         _job_or_404(job_id)
 
         async def stream():
@@ -539,7 +579,8 @@ def create_app(
                 eventos = store.events_since(job_id, last_id)
                 for ev in eventos:
                     last_id = ev.id
-                    yield f"id: {ev.id}\nevent: {ev.kind}\ndata: {ev.message}\n\n"
+                    data = json.dumps(_evento_dict(ev), ensure_ascii=False)
+                    yield f"id: {ev.id}\nevent: {ev.kind}\ndata: {data}\n\n"
                 job = store.get_job(job_id)
                 if job is not None and job.status in TERMINAL_STATUSES and not eventos:
                     yield "event: end\ndata: fin\n\n"

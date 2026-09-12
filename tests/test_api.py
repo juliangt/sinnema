@@ -720,3 +720,88 @@ def test_series_sin_intentos_usa_el_default_del_proyecto(gestion):
     assert res.status_code == 202
     job = store.get_job(res.json()["job_id"])
     assert job.max_critique_attempts == 3
+
+
+# ----------------- Eventos por nodo y spec desfasado (red-3d) -----------------
+
+
+def test_eventos_por_nodo_en_timeline(cliente):
+    """Con el gateway falso, el timeline muestra la secuencia real de nodos:
+    plan, compuerta y el pipeline completo, con rol y claves por paso."""
+    client, store = cliente
+    res = client.post("/api/series", json={
+        "project_id": "educativo", "topic": "Fotosíntesis en 60 segundos",
+        "num_chapters": 2,
+    }, headers={"X-Owner": "ana"})
+    job_id = res.json()["job_id"]
+    esperar(store, job_id)
+
+    historia = client.get(f"/api/jobs/{job_id}/events/history").json()
+    kinds = {e["kind"] for e in historia}
+    assert {"node_start", "node_end", "progress", "done"} <= kinds
+
+    inicios = [e for e in historia if e["kind"] == "node_start"]
+    nodos = [e["node"] for e in inicios]
+    assert nodos[0] == "plan_series"
+    assert "scriptwriter" in nodos and "chief_critic" in nodos
+
+    # Payload §6.2: node_start trae node/rol/paso; node_end suma claves.
+    arranque_plan = inicios[0]
+    assert arranque_plan["rol"] == "planner"
+    assert arranque_plan["paso"] == 1
+    fin_plan = next(
+        e for e in historia
+        if e["kind"] == "node_end" and e["node"] == "plan_series"
+    )
+    assert "series_plan" in fin_plan["claves"]
+
+    # Los nodos sin agente (cierre) reportan rol null; los legacy, mensaje.
+    assert any(e["kind"] == "progress" and "mensaje" in e for e in historia)
+
+    # El ciclo de crítica re-invoca al guionista (2 capítulos = 2 corridas).
+    assert nodos.count("scriptwriter") >= 2
+
+
+def test_sse_emite_data_json_y_termina(cliente):
+    client, store = cliente
+    res = client.post("/api/series", json={
+        "project_id": "educativo", "topic": "Fotosíntesis", "num_chapters": 2,
+    }, headers={"X-Owner": "ana"})
+    job_id = res.json()["job_id"]
+    esperar(store, job_id)
+
+    with client.stream("GET", f"/api/jobs/{job_id}/events") as respuesta:
+        cuerpo = "".join(respuesta.iter_text())
+    assert "event: node_start" in cuerpo
+    assert '"kind": "node_start"' in cuerpo and '"node": "plan_series"' in cuerpo
+    assert '"mensaje"' in cuerpo  # kinds legacy viajan como texto en el JSON
+    assert "event: end" in cuerpo
+
+
+def test_spec_desfasado_compara_con_toml_vigente(cliente):
+    client, store = cliente
+    job = store.create_job(owner="ana", project_id="comida", topic="Asado",
+                           num_chapters=1, max_critique_attempts=2)
+    store.set_status(job.job_id, JobStatus.RUNNING)
+
+    # Sin huella congelada no se afirma desfasado (False, no un error).
+    assert client.get(f"/api/jobs/{job.job_id}").json()["spec_desfasado"] is False
+
+    # Huella vieja + TOML vigente distinto → desfasado.
+    store.set_spec_fingerprint(job.job_id, "huella-vieja")
+    detalle = client.get(f"/api/jobs/{job.job_id}").json()
+    assert detalle["spec_desfasado"] is True
+
+    # Con la huella correcta del TOML vigente → no desfasado. La app del
+    # fixture resuelve "comida" por la misma cascada que en dev (repo).
+    import tomllib
+    from sinnema.infrastructure.projects import resolve_writable_projects_dir
+    from sinnema.infrastructure.projects.store import fingerprint_spec
+    with open(resolve_writable_projects_dir() / "comida.toml", "rb") as f:
+        huella_vigente = fingerprint_spec(tomllib.load(f))
+    store.set_spec_fingerprint(job.job_id, huella_vigente)
+    assert client.get(f"/api/jobs/{job.job_id}").json()["spec_desfasado"] is False
+
+    # Un job terminal no reporta el indicador.
+    store.set_status(job.job_id, JobStatus.COMPLETED)
+    assert "spec_desfasado" not in client.get(f"/api/jobs/{job.job_id}").json()
