@@ -86,12 +86,20 @@ from sinnema.infrastructure.runtime.runner import SeriesWorker
 
 logger = logging.getLogger("sinnema.api")
 
-STATIC_DIR = Path(__file__).resolve().parent / "static"
-
-# UI 3D (spec-red-3d §8.4): build de Vite en `web/dist`, resuelto en cascada
-# con el legacy — sin build JS, el fallback mantiene `sinnema-server`
-# funcional. Solo existe en un checkout del repo (la wheel no la empaqueta).
+# UI 3D (spec-red-3d §8.4/§12.3): build de Vite en `web/dist`. El legacy de
+# `static/` fue reemplazado (Fase 6d, con la lista de paridad completa);
+# sin build JS se sirve una página indicando cómo construir la UI.
 WEB_DIST_DIR = Path(__file__).resolve().parents[3] / "web" / "dist"
+
+_SIN_BUILD = """<!doctype html><html lang="es"><head><meta charset="utf-8">
+<title>Sinnema — UI 3D sin construir</title></head>
+<body style="background:#0f1115;color:#e8eaf0;font:15px/1.6 system-ui;max-width:640px;margin:80px auto">
+<h1>Sinnema</h1>
+<p>La UI 3D del monitor de la red de agentes aún no está construida.
+Generala con:</p>
+<pre style="background:#171a21;padding:12px;border-radius:8px">cd web &amp;&amp; npm install &amp;&amp; npm run build</pre>
+<p>Mientras tanto, la <a style="color:#7aa2ff" href="/docs">API</a> sigue
+completa.</p></body></html>"""
 
 #: Raíz de datos del servicio (jobs, checkpoints, auditoría, lore, salidas).
 DEFAULT_DATA_DIR = Path(
@@ -681,12 +689,12 @@ def create_app(
     # --------------------------------- web ---------------------------------
 
     @app.get("/", response_class=HTMLResponse)
-    def index() -> FileResponse:
-        # Cascada §8.4: UI 3D (web/dist) si hay build; si no, legacy static/.
+    def index():
+        # UI 3D (web/dist) si hay build; si no, la página "sin construir".
         dist_index = WEB_DIST_DIR / "index.html"
         if dist_index.is_file():
             return FileResponse(dist_index)
-        return FileResponse(STATIC_DIR / "index.html")
+        return HTMLResponse(_SIN_BUILD)
 
     @app.get("/assets/{ruta:path}", include_in_schema=False)
     def assets(ruta: str) -> FileResponse:

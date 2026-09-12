@@ -196,8 +196,9 @@ def test_home_sirve_la_interfaz(cliente):
     assert "Sinnema" in res.text
 
 
-def test_home_cascada_web_dist_o_legacy(cliente):
-    """Cascada §8.4: con build de Vite sirve `web/dist`; sin él, el legacy."""
+def test_home_cascada_web_dist_o_sin_build(cliente):
+    """§8.4/§12.3: con build de Vite sirve `web/dist`; sin build, la página
+    que indica cómo construirla (el legacy de static/ ya no existe)."""
     client, _ = cliente
     dist_index = Path(__file__).resolve().parents[1] / "web" / "dist" / "index.html"
     res = client.get("/")
@@ -205,7 +206,7 @@ def test_home_cascada_web_dist_o_legacy(cliente):
     if dist_index.is_file():
         assert "Red de agentes 3D" in res.text
     else:
-        assert "Gestión de proyectos" in res.text
+        assert "npm run build" in res.text
 
 
 def test_assets_inexistente_da_404(cliente):

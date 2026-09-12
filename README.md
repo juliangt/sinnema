@@ -772,8 +772,10 @@ sinnema-server                 # http://127.0.0.1:8000
 #### UI 3D: monitor de la red de agentes (`web/`)
 
 El frontend 3D (`web/`: React Three Fiber + Vite + TypeScript + Tailwind,
-spec `docs/spec-red-3d.md`) se sirve en cascada: si existe el build
-`web/dist`, `GET /` sirve la UI 3D; si no, la web legacy de `static/`.
+spec `docs/spec-red-3d.md`) es la UI del servicio: `GET /` sirve el build
+`web/dist` y, sin build JS, una página que indica cómo generarlo (la web
+legacy de `static/` fue reemplazada al completar la lista de paridad
+§12.3 de la spec).
 
 ```bash
 cd web
@@ -784,8 +786,8 @@ npm run test       # vitest
 npm run lint       # eslint
 ```
 
-Sin build JS el fallback legacy mantiene `sinnema-server` funcional, y la
-wheel no empaqueta `web/`.
+Sin build JS la API sigue completa (`/docs`), y la wheel no empaqueta
+`web/`.
 
 La web (servida en `/`) tiene tres pestañas: **Proyectos** (crear, editar,
 duplicar, eliminar, ver prompts compuestos y lore; **editor de flujo** por
