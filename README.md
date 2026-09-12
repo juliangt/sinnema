@@ -703,7 +703,7 @@ calculado sobre el flujo efectivo del proyecto.
 
 ## 17. Estrategia de pruebas
 
-La suite (≈365 tests) cubre cada capa de forma aislada y sin red:
+La suite (≈425 tests backend + 27 vitest frontend, en CI) cubre cada capa de forma aislada y sin red:
 
 - **Contratos de dominio:** cada modelo con sus invariantes y casos límite,
   incluido el entregable 1.1 (coherencia alcance ↔ fallos, adjuntos).
@@ -787,7 +787,8 @@ npm run lint       # eslint
 ```
 
 Sin build JS la API sigue completa (`/docs`), y la wheel no empaqueta
-`web/`.
+`web/`. El recorrido de verificación de punta a punta está documentado en
+[`docs/e2e-red-3d.md`](docs/e2e-red-3d.md).
 
 La web (servida en `/`) tiene tres pestañas: **Proyectos** (crear, editar,
 duplicar, eliminar, ver prompts compuestos y lore; **editor de flujo** por
