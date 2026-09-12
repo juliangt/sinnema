@@ -7,8 +7,10 @@ import { useSelectionStore } from '../stores/selectionStore'
 import { useProjectStore } from '../stores/projectStore'
 import { COLOR_PROVEEDOR } from '../scene/colores'
 import { LLMConfigForm } from './LLMConfigForm'
+import { PanelEstado } from './PanelEstado'
+import { PanelFlujo } from './PanelFlujo'
 
-type Pestaña = 'agente'
+type Pestaña = 'agente' | 'estado' | 'flujo'
 
 function Fila({ etiqueta, children }: { etiqueta: string; children: React.ReactNode }) {
   return (
@@ -35,7 +37,7 @@ export function InspectorPanel() {
         <h2 className="text-xs font-semibold tracking-wide text-texto">Inspector</h2>
         {nodo !== null && (
           <div className="flex gap-1">
-            {(['agente'] as const).map((p) => (
+            {(['agente', 'estado', 'flujo'] as const).map((p) => (
               <button
                 key={p}
                 type="button"
@@ -112,8 +114,10 @@ export function InspectorPanel() {
             </div>
           </details>
         </div>
+      ) : pestaña === 'estado' ? (
+        <PanelEstado nodoId={seleccionado} />
       ) : (
-        <p className="px-3 py-4 text-xs text-texto-suave">Pestaña en construcción.</p>
+        <PanelFlujo />
       )}
     </aside>
   )

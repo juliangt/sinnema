@@ -170,5 +170,5 @@ export interface Artifact {
   paso: string // nombre del paso/nodo
   resumen: string
   artefacto?: unknown // JSON del contrato (si lo hubo)
-  prompts?: { sistema: string; usuario: string } // §7.4
+  prompts?: string // contenido del NNN_<nodo>_prompts.txt (§7.4)
 }
