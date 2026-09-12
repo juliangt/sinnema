@@ -3,6 +3,8 @@
 !.gitignore
 !.github/
 !.github/**
+!.env.example
+!.dockerignore
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -71,6 +73,9 @@ instance/
 
 # Scrapy stuff:
 .scrapy
+
+# Datos del servicio (SQLite, lore, auditoría) — también el volumen de Docker
+datos-servidor/
 
 # Sphinx documentation
 docs/_build/

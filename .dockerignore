@@ -1,0 +1,20 @@
+# Contexto de build del backend: dejar afuera lo pesado y lo local.
+.git
+.venv
+venv
+env
+.env
+.zcode
+.github
+.pytest_cache
+.mypy_cache
+.ruff_cache
+__pycache__
+**/__pycache__
+*.pyc
+datos-servidor
+dist
+web
+docs
+tests
+uv.lock

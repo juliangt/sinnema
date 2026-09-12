@@ -717,6 +717,23 @@ def main() -> int:
     )
     host = os.environ.get("SINNEMA_HOST", "127.0.0.1")
     port = int(os.environ.get("SINNEMA_PORT", "8000"))
+    if os.environ.get("SINNEMA_RELOAD", "").strip().lower() in ("1", "true", "yes"):
+        # Hot reload (issue #14): exige import string porque el supervisor de
+        # uvicorn relanza el proceso. Solo se vigila el código del motor:
+        # reiniciar por un cambio de datos/TOML mataría los jobs en curso.
+        opciones = {}
+        if Path("sinnema").is_dir():
+            opciones["reload_dirs"] = ["sinnema"]
+        uvicorn.run(
+            "sinnema.infrastructure.api.app:create_app",
+            factory=True,
+            host=host,
+            port=port,
+            reload=True,
+            log_level="warning",
+            **opciones,
+        )
+        return 0
     app = create_app()
     print(f"Sinnema sirviendo en http://{host}:{port}")
     uvicorn.run(app, host=host, port=port, log_level="warning")

@@ -850,7 +850,43 @@ La API:
 
 Variables de entorno del servicio: `SINNEMA_DATA_DIR` (raíz de jobs,
 checkpoints, auditoría, lore y salidas; por defecto `datos-servidor/`),
-`SINNEMA_HOST` y `SINNEMA_PORT`.
+`SINNEMA_HOST`, `SINNEMA_PORT`, `SINNEMA_LOG_LEVEL`, `SINNEMA_PROJECTS_DIR`
+y `SINNEMA_RELOAD` (`1` = hot reload del motor: uvicorn vigila `sinnema/` y
+relanza el proceso al editar).
+
+### Levantar con Docker (API + web + datos)
+
+El entorno completo de desarrollo corre con Docker Compose, sin instalar
+Python ni Node en el host:
+
+```bash
+cp .env.example .env   # claves LLM (opcional: la API levanta igual sin ellas)
+docker compose up      # web: http://localhost:5173 — API: http://localhost:8000 (docs en /docs)
+```
+
+- **`api`**: imagen `python:3.12-slim` que instala `sinnema[server]` y corre
+  `sinnema-server` con `SINNEMA_RELOAD=1`. El código `sinnema/` se monta como
+  volumen: editar un archivo recarga el servidor sin rebuild (solo se vigila
+  `sinnema/`, así un cambio de datos o de TOML no reinicia el proceso).
+- **`web`**: imagen `node:20-alpine` con `npm ci` (node_modules vive en la
+  imagen, el host no necesita instalar nada) y el dev server de Vite con hot
+  reload: se montan `web/src` y los configs. El proxy de `/api` se apunta a
+  la API con `VITE_API_PROXY_TARGET` (`http://api:8000` dentro de compose;
+  `http://127.0.0.1:8000` sigue siendo el default para dev sin Docker).
+- **Datos**: `datos-servidor/` del host (SQLite de jobs, checkpoints,
+  auditoría y lore) y `proyectos/` (TOML de shows) van montados como
+  volúmenes: sobreviven a `docker compose down` y se editan sin rebuild.
+- **Claves y Ollama**: el `.env` viaja completo a los contenedores (claves
+  LLM, `OLLAMA_HOST`, overrides `LLM_*`). Desde Docker, el Ollama del host no
+  es alcanzable en `127.0.0.1`: apuntar a `http://host.docker.internal:11434`
+  en el `.env`, o levantar el servicio contenedorizado con
+  `docker compose --profile ollama up -d` (modelos en el volumen
+  `ollama-models`; luego `docker compose exec ollama ollama pull <modelo>` y
+  `OLLAMA_HOST=http://ollama:11434` en el `.env`).
+
+Cambiar dependencias sí requiere rebuild de imagen: tras tocar
+`pyproject.toml` o `package.json`, `docker compose up --build`. El flujo de
+desarrollo sin Docker (uv + `npm run dev`) no cambia.
 
 ### Gestión web de proyectos: los archivos son la fuente de verdad
 
