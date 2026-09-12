@@ -9,6 +9,7 @@ import time
 
 import pytest
 
+from sinnema.infrastructure.projects import load_project
 from sinnema.infrastructure.runtime.jobs import JobStatus, SqliteJobStore
 from sinnema.infrastructure.runtime.runner import SeriesWorker
 from tests.conftest import gateway_con_serie
@@ -100,3 +101,56 @@ def test_proyecto_inexistente_falla_con_mensaje(worker):
                         num_chapters=1, max_critique_attempts=1)
     assert job.status is JobStatus.FAILED
     assert "no-existe" in job.error
+
+
+# ----------------- Streaming de tokens al store (red-3d §7.1) -----------------
+
+
+class GatewayConStream:
+    """Gateway falso con event_sink: emite tokens durante cada generate."""
+
+    def __init__(self, gateway_base):
+        self._base = gateway_base
+        self._sink = None
+
+    def __call__(self, proyecto, event_sink=None):
+        self._sink = event_sink
+        return self
+
+    def generate(self, role, schema, system_prompt, user_prompt, *, on_event=None):
+        if self._sink is not None:
+            self._sink(role, {"tipo": "token", "texto": f"texto de {role}"})
+        return self._base.generate(role, schema, system_prompt, user_prompt)
+
+
+def test_tokens_del_stream_llegan_al_store_con_nodo_y_rol(tmp_path):
+    from tests.conftest import FakeGateway
+
+    store = SqliteJobStore(tmp_path / "jobs.sqlite")
+    gateway_streaming = GatewayConStream(gateway_con_serie(num_chapters=1))
+    worker = SeriesWorker(
+        store,
+        checkpoint_dir=tmp_path / "checkpoints",
+        audit_root=tmp_path / "auditoria",
+        lore_root=tmp_path / "continuidad",
+        gateway_factory=gateway_streaming,
+        project_loader=load_project,
+    )
+    worker.start()
+    job = store.create_job(owner="ana", project_id="educativo",
+                           topic="Fotosíntesis", num_chapters=1,
+                           max_critique_attempts=2)
+    worker.submit(job.job_id)
+    for _ in range(100):
+        leido = store.get_job(job.job_id)
+        if leido.status in (JobStatus.COMPLETED, JobStatus.FAILED):
+            break
+        time.sleep(0.1)
+    assert leido.status is JobStatus.COMPLETED
+
+    tokens = [e for e in store.events_since(job.job_id) if e.kind == "token"]
+    assert tokens, "el streaming del gateway debe terminar en job_events"
+    primero = tokens[0].payload
+    assert primero["rol"] == "planner"
+    assert primero["node"] == "plan_series"
+    assert "planner" in primero["texto"]

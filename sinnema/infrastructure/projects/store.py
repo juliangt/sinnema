@@ -48,6 +48,19 @@ def packaged_projects_dir() -> Optional[Path]:
     return empaquetado if empaquetado.is_dir() else None
 
 
+def fingerprint_spec(datos: Dict[str, Any]) -> str:
+    """Huella sha256 del spec congelado de un job (spec-red-3d §11.4).
+
+    Canoniza el dict del TOML a su serialización TOML antes de hashear, de
+    modo que la misma definición produzca siempre la misma huella; la API la
+    recomputa contra el TOML vigente para detectar el spec desfasado.
+    """
+    import hashlib
+
+    canonico = tomli_w.dumps(datos).encode("utf-8")
+    return hashlib.sha256(canonico).hexdigest()
+
+
 class ProjectFileStore:
     """CRUD de proyectos sobre archivos TOML, con fallback de solo lectura."""
 

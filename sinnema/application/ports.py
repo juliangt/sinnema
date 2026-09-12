@@ -6,7 +6,7 @@ adaptador concreto. Así el grafo se puede testear con dobles en memoria.
 """
 from __future__ import annotations
 
-from typing import Dict, Final, Optional, Protocol, Sequence, Type, TypeVar
+from typing import Any, Callable, Dict, Final, Optional, Protocol, Sequence, Type, TypeVar
 
 from pydantic import BaseModel
 
@@ -71,6 +71,14 @@ class AuditTrailPort(Protocol):
         """Registra un fallo que degrada o aborta la ejecución."""
         ...
 
+    def log_prompts(self, step: str, contenido: str) -> None:
+        """Registra los prompts de un paso de agente (spec-red-3d §7.4).
+
+        Es un método opcional del contrato: los adaptadores que no lo
+        implementan simplemente no alimentan el inspector de prompts.
+        """
+        ...
+
 
 class NullAuditTrail:
     """Implementación no-op para cuando no se requiere auditoría."""
@@ -118,6 +126,15 @@ class NullLoreStore:
         return None
 
 
+#: Evento de generación en vivo (spec-red-3d §7.1): ``{"tipo": "token"|"tool_start"|
+#: "tool_end", ...}``. ``token`` lleva ``texto``; ``tool_start`` lleva ``tool`` y
+#: ``args``; ``tool_end`` lleva ``tool`` y ``resumen``.
+EventoGeneracion = Dict[str, Any]
+
+#: Callback opcional de streaming que consume el adaptador por cada evento.
+EventCallback = Callable[[EventoGeneracion], None]
+
+
 class StructuredGenerationPort(Protocol):
     """Puerto de generación estructurada por rol de agente.
 
@@ -132,6 +149,13 @@ class StructuredGenerationPort(Protocol):
         schema: Type[TSchema],
         system_prompt: str,
         user_prompt: str,
+        *,
+        on_event: Optional[EventCallback] = None,
     ) -> TSchema:
-        """Invoca el LLM del rol y devuelve una instancia de ``schema``."""
+        """Invoca el LLM del rol y devuelve una instancia de ``schema``.
+
+        Con ``on_event`` el adaptador puede emitir eventos de generación
+        (tokens de streaming, tools); es opcional con default ``None``: el
+        camino sin eventos es exactamente el de siempre (§12.2).
+        """
         ...

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Iterator, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
@@ -114,7 +114,10 @@ class GenerateSeriesUseCase:
         )
 
     def stream(
-        self, request: SeriesRequest, thread_id: Optional[str] = None
+        self,
+        request: SeriesRequest,
+        thread_id: Optional[str] = None,
+        on_nodo: Optional[Callable[[str, List[str], int], None]] = None,
     ) -> Iterator[PipelineState]:
         """Ejecuta el grafo cediendo el estado tras cada superstep (progreso).
 
@@ -122,6 +125,12 @@ class GenerateSeriesUseCase:
         corrida; usar ``save_lore`` al terminar para consolidar la memoria.
         Con ``thread_id`` (y un checkpointer inyectado) el estado persiste y
         la corrida es reanudable bajo ese hilo.
+
+        Con ``on_nodo`` (spec-red-3d §7.2) el stream suma el modo
+        ``updates``: por cada nodo que corrió se invoca
+        ``on_nodo(nodo, claves_actualizadas, superstep)`` — el runner lo
+        traduce a los eventos ``node_start``/``node_end``. El contrato de
+        salida del generador no cambia: sigue cediendo snapshots ``values``.
         """
         proyecto = request.project
         flujo = resolver_flujo(proyecto)
@@ -156,7 +165,21 @@ class GenerateSeriesUseCase:
         }
         if thread_id is not None:
             config["thread_id"] = thread_id
-        yield from self._graph.stream(estado_inicial, config=config, stream_mode="values")
+        if on_nodo is None:
+            yield from self._graph.stream(estado_inicial, config=config, stream_mode="values")
+            return
+        superstep = 0
+        for modo, datos in self._graph.stream(
+            estado_inicial, config=config, stream_mode=["values", "updates"]
+        ):
+            if modo == "updates":
+                superstep += 1
+                for nodo, claves in datos.items():
+                    if nodo.startswith("__"):
+                        continue
+                    on_nodo(nodo, list(claves.keys()), superstep)
+            else:
+                yield datos
 
     def save_lore(self, state: Optional[PipelineState]) -> None:
         """Consolida el lore acumulado de la corrida en el almacén del proyecto."""

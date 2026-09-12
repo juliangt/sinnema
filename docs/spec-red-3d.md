@@ -216,7 +216,7 @@ export interface Artifact {
   paso: string;             // nombre del paso/nodo
   resumen: string;
   artefacto?: unknown;      // JSON del contrato (si lo hubo)
-  prompts?: { sistema: string; usuario: string };  // §7.4
+  prompts?: string;         // §7.4: contenido del NNN_<nodo>_prompts.txt
 }
 ```
 
@@ -354,7 +354,10 @@ data: {"kind":"token","job_id":"a1b2c3","ts":"…","node":"scriptwriter","rol":"
 ```
 
 El `event:` del frame sigue siendo el kind (compatibilidad con el cliente
-`EventSource` actual); `data` pasa de texto plano a JSON con `kind` dentro. El
+`EventSource` actual); `data` pasa de texto plano a JSON con `kind` dentro.
+Los kinds legacy serializan su message como `"mensaje"` (clave en español,
+coherente con el resto del contrato); los estructurados fusionan su payload.
+El
 puente SSE→SQLite (polling interno de 0.5 s) se mantiene: la granularidad por
 token no exige push —el rate real es el de generación del LLM, no por carácter—
 y preserva el modelo de un solo proceso.
@@ -377,7 +380,10 @@ class StructuredGenerationPort(Protocol):
 
 `LangChainStructuredGateway.generate`: con `on_event`, itera
 `self._structured[rol].stream(mensajes)` acumulando el objeto parcial y emitiendo
-`{"tipo": "token", "texto": …}` por chunk; el valor final es el objeto completo
+`{"tipo": "token", "texto": …}` por chunk — el `texto` es el render JSON del
+objeto parcial acumulado (salida estructurada = objetos parciales, no texto
+plano): el cliente REEMPLAZA el buffer del nodo en cada chunk. El valor final
+es el objeto completo
 (igual validación `isinstance` que hoy). Si el proveedor no soporta streaming de
 salida estructurada (excepción al iniciar el stream), **fallback al `invoke`
 actual**: el rol solo emite `node_start`/`node_end`. La política de reintentos
@@ -445,8 +451,8 @@ web/
     ├── scene/        # SceneCanvas · ProjectScene · AgentNode3D · EdgeLine ·
     │                 # EdgePulses · CameraRig · layout.ts · dispose.ts
     ├── overlay/      # TopBar/ProjectSwitcher · InspectorPanel ·
-    │                 # LLMConfigForm · StateInspector · FlowEditor ·
-    │                 # EventTimeline · JobsDrawer
+    │                 # LLMConfigForm · PanelEstado · PanelFlujo ·
+    │                 # EjecucionPanel (timeline+jobs) · ProyectosDrawer
     └── hooks/        # useExecutionSync · useProjectNetwork · useCatalogos
 ```
 
@@ -476,11 +482,12 @@ R3F disposea geometrías/materiales declarativos al desmontar.
 
 - Dev: `npm run dev` (Vite en :5173) con proxy de `/api`; `sinnema-server` en
   :8000 como hoy.
-- Producción: `create_app` resuelve la UI en cascada `web/dist` (si existe) →
-  `static/index.html` (legacy). `GET /` sirve el `index.html` del dist; los
-  assets bajo `/assets/`. `web/dist` **no se commitea**: sin build JS, el
-  fallback mantiene `sinnema-server` funcional (y la wheel empaqueta solo lo
-  de siempre).
+- Producción: `create_app` resuelve la UI desde `web/dist` (si existe); los
+  assets bajo `/assets/`. `web/dist` **no se commitea** y la wheel empaqueta
+  solo lo de siempre. Sin build JS, `GET /` sirve una página indicando cómo
+  construir la UI y la API queda completa en `/docs`: el fallback legacy de
+  `static/` fue eliminado al cerrar la Fase 6 con la lista de paridad §12.3
+  completa (decisión "Reemplazo" de §2).
 
 ## 9. Canvas 3D (Three.js / R3F)
 
@@ -548,8 +555,8 @@ sobre la curva de su arista. Activación:
 
 - **Dirigida por eventos**: `node_end(A)` seguido de `node_start(B)` dispara un
   pulso por las aristas `A→B` (mensaje transmitido).
-- **Ambiental**: mientras un job corre, flujo lento y tenue sobre el camino
-  activo (la secuencia de nodos ya visitados en el capítulo corriente).
+- **Ambiental**: mientras un job corre, flujo lento y tenue sobre el tramo
+  activo (los últimos dos nodos del camino corriente; implementación §10).
 
 ### 9.5 Estados visuales por nodo
 
@@ -588,8 +595,10 @@ objetivo (transiciones suaves, nunca saltos).
 1. Abre `EventSource(/api/jobs/{id}/events)`; el navegador gestiona
    reconexión + `Last-Event-ID` (el endpoint ya numera con `id:`).
 2. Dispacha cada frame al `executionStore` (zustand): log circular (últimos
-   ~500 eventos, para el timeline), mapa `nodo → NodeVisualState`, buffer de
-   tokens por nodo (para el inspector), contadores por kind.
+   ~500 eventos no-token, para el timeline — los tokens viven en su buffer
+   por nodo y en los contadores, para no llevar el timeline a frecuencia de
+   render), mapa `nodo → NodeVisualState`, buffer de tokens por nodo (para
+   el inspector), contadores por kind.
 3. Respaldo: polling `GET /api/jobs/{id}` cada 2 s para el badge de status (ya
    existe en la web actual) — cubre SSE bloqueado por proxy.
 4. Al llegar a status terminal (`completed`/`failed`), cierra el EventSource y
@@ -652,11 +661,11 @@ de `construirEditorFlujo` de la web actual, con los mismos validadores.
    eventos viejos (sin payload) se renderizan como texto.
 2. **Contrato del puerto**: `on_event` es opcional con default `None` → CLI,
    tests con gateway falso y uso actual quedan intactos.
-3. **Reemplazo de la web**: `web/dist` → fallback `static/`. `index.html` se
-   elimina solo al cierre (Fase 6) con esta **lista de paridad**: CRUD de
-   proyectos, editor de flujo/alcance, agentes custom, lanzar corridas
-   (`POST /api/series`), lista de jobs + SSE + viewer (enlace) + deliverable,
-   lore (ver/reiniciar), prompts preview.
+3. **Reemplazo de la web**: `web/dist` es la UI del servicio. `static/
+   index.html` se eliminó al cierre (Fase 6d) tras verificar esta **lista de
+   paridad**: CRUD de proyectos, editor de flujo/alcance, agentes custom,
+   lanzar corridas (`POST /api/series`), lista de jobs + SSE + viewer
+   (enlace) + deliverable, lore (ver/reiniciar), prompts preview.
 4. **Empaquetado**: la wheel no incluye `web/` ni `dist`; sin build JS el
    fallback legacy mantiene `sinnema-server` útil. El build queda documentado
    en README (`cd web && npm install && npm run build`).
@@ -684,8 +693,14 @@ README/spec actualizados.
 
 ### Fase 1 — Config LLM completa + red como recurso
 
-1. `projects.py`: `top_p`/`max_tokens`/`tools` en `AgentConfig`, `_CLAVES_AGENTE`
-   y validaciones §3.12–13.
+> **Implementada** (2026-09-09): claves `top_p`/`max_tokens`/`tools` con
+> round-trip `PUT`/`GET` y llegada a los constructores LangChain; `/red` y
+> `/api/meta/catalogos` operativos. El vocabulario de tools integradas vive en
+> `sinnema/application/tools.py` (las implementaciones `@tool` llegan en la
+> Fase 4 y se registran contra ese catálogo).
+
+1. `projects.py`: `top_p`/`max_tokens`/`tools` en `AgentConfig`,
+   `_CLAVES_AGENTE` y validaciones §3.12–13.
 2. `providers.py`: firma extendida de `build_provider_model` (mapeo
    `num_predict` en Ollama) y propagación desde `resolve_role_spec`.
 3. `GET /api/projects/{id}/red`: derivación desde `grafo.get_graph()` con
@@ -700,6 +715,9 @@ round-trip por `PUT`/`GET` y llega a los constructores LangChain;
 `flujo-efectivo`.
 
 ### Fase 2 — Scaffold web + canvas estático
+
+> **Implementada** (2026-09-12, commits 79302df/7b8b0d8/c293987): `web/`
+> completa con canvas estático, selección/cámara, dispose y servido.
 
 1. `web/` con Vite+R3F+TS+Tailwind/shadcn, proxy y lint.
 2. Tipos §4, cliente REST, `projectStore`/`selectionStore`, `ProjectSwitcher`.
@@ -717,6 +735,8 @@ y el overlay muestra los metadatos del nodo; `sinnema-server` sirve el build.
 
 ### Fase 3 — Eventos por nodo
 
+> **Implementada** (2026-09-12, commits 69733de/bebc97c).
+
 1. Migración `job_events.payload` + `jobs.spec_fingerprint` (§6.1) y `add_event`
    extendido.
 2. `stream_mode="updates"` en el use case (§7.2); el runner emite
@@ -730,6 +750,8 @@ muestra la secuencia real de nodos (incluida la compuerta y el ciclo de crítica
 y una base `jobs.sqlite` pre-migración sigue legible.
 
 ### Fase 4 — Tokens y tools
+
+> **Implementada** (2026-09-12, commits 12cc028/d79ebc9/72171f6).
 
 1. `on_event` en el puerto + `generate` con streaming y fallback (§7.1);
    `build_gateway(event_sink=…)`.
@@ -745,6 +767,8 @@ corrida con eventos `tool_start/tool_end` y tokens visibles; sin `tools` y sin
 
 ### Fase 5 — Sincronización + estados visuales
 
+> **Implementada** (2026-09-12, commits cc1850e/c72437e/a56b717).
+
 1. `useExecutionSync` + `executionStore` (suscripciones transitorias §10).
 2. Máquina de estados visuales §9.5 en los materiales de los nodos.
 3. Pulsos dirigidos por eventos + flujo ambiental (§9.4).
@@ -756,6 +780,9 @@ PRs: **5a** hook+stores, **5b** estados, **5c** pulsos.
 el timeline 2D consistente con los eventos.
 
 ### Fase 6 — Inspector, mutación y reemplazo
+
+> **Implementada** (2026-09-12, commits 2b8c332/640e379/4bfcbcc/cb251e8):
+> incluye el borrado de la web legacy con la paridad §12.3 verificada.
 
 1. `InspectorPanel`: pestaña Agente con formulario LLM completo + flujo de
    guardado §11.1 (PUT, re-hidratación, aviso).

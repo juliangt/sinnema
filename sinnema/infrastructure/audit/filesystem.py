@@ -91,6 +91,21 @@ class FilesystemAuditTrail:
         if self._activo:
             self._append_log(f"ERROR · {message}")
 
+    def log_prompts(self, step: str, contenido: str) -> None:
+        """Prompts de un paso de agente (§7.4): ``NNN_<nodo>_prompts.txt``.
+
+        Usa el número del paso que está por escribirse (``counter + 1``) sin
+        avanzarlo: el nodo llama a ``log_step`` inmediatamente después de
+        generar, así el archivo de prompts queda emparejado con su paso.
+        """
+        if not self._activo:
+            return
+        nombre = f"{self._counter + 1:03d}_{_slug(step)}_prompts.txt"
+        try:
+            (self._dir / nombre).write_text(contenido, encoding="utf-8")
+        except OSError as exc:
+            logger.warning("Auditoría: no se pudo escribir %s (%s).", nombre, exc)
+
     # --------------------------------- internals ---------------------------------
 
     def _append_log(self, message: str) -> None:

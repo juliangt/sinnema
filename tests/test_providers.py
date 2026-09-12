@@ -6,9 +6,13 @@ import pytest
 from sinnema.application.projects import AgentConfig
 from sinnema.infrastructure.llm.gateway import build_gateway
 from sinnema.infrastructure.llm.providers import (
+    DEFAULT_CUSTOM_ROLE_SPEC,
     DEFAULT_ROLE_SPECS,
+    _generation_kwargs,
     apply_env_overrides,
+    build_provider_model,
     build_role_clients,
+    default_role_spec,
     provider_available,
     resolve_role_spec,
 )
@@ -180,3 +184,73 @@ def test_build_gateway_sin_flujo_conserva_la_semantica_legacy(entorno_llm_limpio
         "planner", "continuity", "scriptwriter", "adapter", "critic",
         "technical_director",
     }
+
+
+# ------------- top_p / max_tokens (spec-red-3d §3, Fase 1) -------------
+
+@pytest.mark.parametrize(
+    "proveedor, parametro_max",
+    [
+        ("anthropic", "max_tokens"),
+        ("openai", "max_tokens"),
+        ("google", "max_output_tokens"),
+        ("ollama", "num_predict"),
+    ],
+)
+def test_generation_kwargs_traduce_el_nombre_por_proveedor(proveedor, parametro_max):
+    assert _generation_kwargs(proveedor, 0.9, 100) == {
+        "top_p": 0.9, parametro_max: 100,
+    }
+
+
+def test_generation_kwargs_ausentes_no_se_pasan():
+    """Sin override declarado rige el default del proveedor (spec §3)."""
+    assert _generation_kwargs("openai", None, None) == {}
+    assert _generation_kwargs("ollama", 0.5, None) == {"top_p": 0.5}
+
+
+def test_build_provider_model_ollama_mapea_max_tokens_a_num_predict(entorno_llm_limpio):
+    cliente = build_provider_model("ollama", "llama3.1", 0.5, top_p=0.9, max_tokens=512)
+    assert cliente.top_p == 0.9
+    assert cliente.num_predict == 512
+
+
+def test_build_provider_model_sin_overlays_deja_los_defaults(entorno_llm_limpio):
+    cliente = build_provider_model("ollama", "llama3.1", 0.5)
+    assert cliente.top_p is None
+    assert cliente.num_predict is None
+
+
+def test_resolve_role_spec_propaga_los_overrides_del_proyecto(entorno_llm_limpio):
+    resuelto = resolve_role_spec(
+        _spec_de("scriptwriter"), AgentConfig(top_p=0.7, max_tokens=256)
+    )
+    assert resuelto.top_p == 0.7
+    assert resuelto.max_tokens == 256
+    assert resuelto.temperature == _spec_de("scriptwriter").temperature
+
+
+def test_resolve_role_spec_sin_declaracion_queda_en_default(entorno_llm_limpio):
+    resuelto = resolve_role_spec(_spec_de("scriptwriter"), AgentConfig())
+    assert resuelto.top_p is None
+    assert resuelto.max_tokens is None
+
+
+def test_build_role_clients_lleva_los_overrides_al_constructor(entorno_llm_limpio):
+    """La cadena completa: [agentes.<rol>] -> resolve -> constructor LangChain."""
+    clientes = build_role_clients(overrides={
+        "scriptwriter": AgentConfig(
+            proveedor="ollama", modelo="llama3.1", top_p=0.6, max_tokens=128,
+        ),
+    })
+    escritor = clientes["scriptwriter"]
+    assert type(escritor).__name__ == "ChatOllama"
+    assert escritor.top_p == 0.6
+    assert escritor.num_predict == 128
+
+
+def test_default_role_spec_cubre_el_registro_y_los_custom():
+    assert default_role_spec("critic").model == "claude-3-5-sonnet-latest"
+    generico = default_role_spec("fact_checker")  # rol custom cualquiera
+    assert generico.model == DEFAULT_CUSTOM_ROLE_SPEC.model
+    assert generico.fallback_providers == DEFAULT_CUSTOM_ROLE_SPEC.fallback_providers

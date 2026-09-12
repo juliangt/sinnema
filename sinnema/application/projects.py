@@ -26,6 +26,7 @@ from sinnema.application.ports import (
     ROLE_PLANNER,
     ROLE_SCRIPTWRITER,
 )
+from sinnema.application.tools import TOOLS_INTEGRADAS
 from sinnema.domain.constants import (
     ALCANCE_COMPUERTA,
     ALCANCE_DEFAULT,
@@ -62,6 +63,10 @@ POLITICAS_DE_AGOTAMIENTO = {
 
 TEMPERATURA_MIN = 0.0
 TEMPERATURA_MAX = 2.0
+
+#: Rango de ``top_p`` (nucleus sampling): ausente = default del proveedor.
+TOP_P_MIN = 0.0
+TOP_P_MAX = 1.0
 
 # --- Agentes custom (declarados 100% en el TOML; spec-agentes-dinamicos §8) ----
 #: Tipos permitidos para un agente custom: la compuerta (revisor) y las fases
@@ -168,6 +173,9 @@ class AgentConfig:
     Todo opcional y ``None``/vacío significa "usa el default global". Las
     ``reglas`` se apendan al final del prompt del sistema del rol; la
     precedencia de proveedor/modelo/temperatura es proyecto > entorno > default.
+    ``top_p``/``max_tokens`` ausentes no se pasan al constructor del proveedor
+    (rige su default); ``tools`` habilita tools integradas para el rol
+    (``[]`` = sin tools, comportamiento actual).
 
     Un agente CUSTOM se declara con ``tipo`` (contexto | enriquecedor |
     revisor): exige ``instrucciones`` (su prompt base), ``contrato`` (salida
@@ -180,6 +188,9 @@ class AgentConfig:
     proveedor: Optional[str] = None
     modelo: Optional[str] = None
     temperatura: Optional[float] = None
+    top_p: Optional[float] = None
+    max_tokens: Optional[int] = None
+    tools: Tuple[str, ...] = ()
     #: La presencia de ``tipo`` convierte al rol en custom (fuera del registro).
     tipo: Optional[str] = None
     contrato: Optional[str] = None
@@ -198,6 +209,21 @@ class AgentConfig:
             validos = ", ".join(sorted(PROVEEDORES_VALIDOS))
             raise ValueError(
                 f"proveedor debe ser uno de: {validos} (recibido: '{self.proveedor}')."
+            )
+        if self.top_p is not None and not (TOP_P_MIN <= self.top_p <= TOP_P_MAX):
+            raise ValueError(
+                f"top_p debe estar entre {TOP_P_MIN} y {TOP_P_MAX} "
+                f"(recibido: {self.top_p})."
+            )
+        if self.max_tokens is not None and self.max_tokens <= 0:
+            raise ValueError(
+                f"max_tokens debe ser mayor que 0 (recibido: {self.max_tokens})."
+            )
+        desconocidas = [t for t in self.tools if t not in TOOLS_INTEGRADAS]
+        if desconocidas:
+            raise ValueError(
+                f"tools desconocidas: {', '.join(desconocidas)} "
+                f"(integradas: {', '.join(sorted(TOOLS_INTEGRADAS))})."
             )
 
     @property
@@ -644,8 +670,8 @@ def _mapear_seccion(
 
 
 _CLAVES_AGENTE = frozenset(
-    {"activo", "reglas", "proveedor", "modelo", "temperatura",
-     "tipo", "contrato", "entradas", "instrucciones"}
+    {"activo", "reglas", "proveedor", "modelo", "temperatura", "top_p",
+     "max_tokens", "tools", "tipo", "contrato", "entradas", "instrucciones"}
 )
 
 #: Un rol custom es un slug nuevo (nombra su nodo del grafo y el sufijo de
@@ -718,6 +744,25 @@ def _mapear_agentes(datos: Dict[str, Any], problemas: List[str]) -> Dict[str, Ag
         if temperatura is not None and not isinstance(temperatura, (int, float)):
             problemas.append(f"'temperatura' en [agentes.{rol}] debe ser numérica.")
             temperatura = None
+        top_p = cfg.get("top_p")
+        if top_p is not None and not isinstance(top_p, (int, float)):
+            problemas.append(f"'top_p' en [agentes.{rol}] debe ser numérica.")
+            top_p = None
+        max_tokens = cfg.get("max_tokens")
+        if max_tokens is not None and not (
+            isinstance(max_tokens, int) and not isinstance(max_tokens, bool)
+        ):
+            problemas.append(f"'max_tokens' en [agentes.{rol}] debe ser entero.")
+            max_tokens = None
+        tools_crudas = cfg.get("tools", [])
+        if not isinstance(tools_crudas, list) or not all(
+            isinstance(t, str) for t in tools_crudas
+        ):
+            problemas.append(
+                f"'tools' en [agentes.{rol}] debe ser una lista de textos."
+            )
+            tools_crudas = []
+        tools = tuple(t.strip() for t in tools_crudas if t and t.strip())
 
         # --- Agentes custom: forma de tipo/contrato/entradas/instrucciones ---
         tipo = cfg.get("tipo")
@@ -766,6 +811,9 @@ def _mapear_agentes(datos: Dict[str, Any], problemas: List[str]) -> Dict[str, Ag
                 proveedor=proveedor.strip().lower() if proveedor else None,
                 modelo=modelo.strip() if modelo else None,
                 temperatura=float(temperatura) if temperatura is not None else None,
+                top_p=float(top_p) if top_p is not None else None,
+                max_tokens=max_tokens,
+                tools=tools,
                 tipo=tipo,
                 contrato=contrato,
                 entradas=entradas,

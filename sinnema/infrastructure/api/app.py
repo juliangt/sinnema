@@ -24,10 +24,11 @@ el reverse proxy / capa de despliegue.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import uvicorn
 from fastapi import FastAPI, Header, HTTPException
@@ -41,20 +42,40 @@ from pydantic import BaseModel, Field
 
 from sinnema.application.graph import build_pipeline_graph
 from sinnema.application.ports import ROLE_PLANNER, ROLE_SCRIPTWRITER
-from sinnema.application.projects import ROLES_ESENCIALES, resolver_flujo
+from sinnema.application.projects import (
+    CONTRATOS_VALIDOS,
+    ROLES_ESENCIALES,
+    TIPOS_CUSTOM,
+    FlowSpec,
+    ProjectSpec,
+    resolver_flujo,
+)
 from sinnema.application.prompts import build_role_system_prompts
-from sinnema.application.registry import AGENT_REGISTRY, definiciones_custom
+from sinnema.application.registry import (
+    AGENT_REGISTRY,
+    CATALOGO_ENTRADAS,
+    definiciones_custom,
+    definiciones_del_proyecto,
+)
 from sinnema.application.requests import MAX_CRITIQUE_ATTEMPTS_LIMIT
+from sinnema.application.tools import TOOLS_INTEGRADAS
 from sinnema.application.use_cases import limite_de_recursion
-from sinnema.domain.constants import SERIES_MAX_CHAPTERS
+from sinnema.domain.constants import ALCANCES, SERIES_MAX_CHAPTERS
 from sinnema.infrastructure.api.viewer import render_deliverable_html
-from sinnema.infrastructure.llm.providers import DEFAULT_ROLE_SPECS
+from sinnema.infrastructure.llm.providers import (
+    DEFAULT_CUSTOM_ROLE_SPEC,
+    DEFAULT_ROLE_SPECS,
+    PROVEEDORES,
+    default_role_spec,
+    resolve_role_spec,
+)
 from sinnema.infrastructure.lore import JsonLoreStore
 from sinnema.infrastructure.projects import (
     ProjectFileStore,
     packaged_projects_dir,
     resolve_writable_projects_dir,
 )
+from sinnema.infrastructure.projects.store import fingerprint_spec
 from sinnema.infrastructure.runtime.jobs import (
     TERMINAL_STATUSES,
     Job,
@@ -65,7 +86,20 @@ from sinnema.infrastructure.runtime.runner import SeriesWorker
 
 logger = logging.getLogger("sinnema.api")
 
-STATIC_DIR = Path(__file__).resolve().parent / "static"
+# UI 3D (spec-red-3d §8.4/§12.3): build de Vite en `web/dist`. El legacy de
+# `static/` fue reemplazado (Fase 6d, con la lista de paridad completa);
+# sin build JS se sirve una página indicando cómo construir la UI.
+WEB_DIST_DIR = Path(__file__).resolve().parents[3] / "web" / "dist"
+
+_SIN_BUILD = """<!doctype html><html lang="es"><head><meta charset="utf-8">
+<title>Sinnema — UI 3D sin construir</title></head>
+<body style="background:#0f1115;color:#e8eaf0;font:15px/1.6 system-ui;max-width:640px;margin:80px auto">
+<h1>Sinnema</h1>
+<p>La UI 3D del monitor de la red de agentes aún no está construida.
+Generala con:</p>
+<pre style="background:#171a21;padding:12px;border-radius:8px">cd web &amp;&amp; npm install &amp;&amp; npm run build</pre>
+<p>Mientras tanto, la <a style="color:#7aa2ff" href="/docs">API</a> sigue
+completa.</p></body></html>"""
 
 #: Raíz de datos del servicio (jobs, checkpoints, auditoría, lore, salidas).
 DEFAULT_DATA_DIR = Path(
@@ -83,6 +117,153 @@ class SeriesRequestBody(BaseModel):
         None, ge=1, le=MAX_CRITIQUE_ATTEMPTS_LIMIT,
         description="Vacío = default del proyecto (sección [pipeline]) o 2.",
     )
+
+
+class _GatewayNulo:
+    """Gateway que nunca genera: compila el grafo solo para derivar su forma."""
+
+    def generate(self, *_a, **_k):  # pragma: no cover
+        raise RuntimeError("El diagrama del grafo no ejecuta el pipeline.")
+
+
+# ---------------------------------------------------------------------------
+# Red efectiva (spec-red-3d §5.1): nodos + aristas del grafo compilado
+# ---------------------------------------------------------------------------
+
+#: Nodos estructurales escritos a mano en ``graph.py`` (sin agente propio).
+_CIERRE_DESCRIPCIONES = {
+    "commit_episode": (
+        "Consolida el episodio aprobado, actualiza el lore y avanza el índice "
+        "de capítulo."
+    ),
+    "fail_chapter": (
+        "Descarta el capítulo y registra el fallo tras agotar los reintentos "
+        "de QA."
+    ),
+    "consolidar_plan": (
+        "Consolida el outline de la serie (hasta = plan): corrida sin episodios."
+    ),
+}
+
+
+def _fases_del_flujo(proyecto: ProjectSpec, flujo: FlowSpec) -> Dict[str, str]:
+    """Columna del layout (§9.1) por nodo, derivada del flujo efectivo."""
+    definiciones = definiciones_del_proyecto(proyecto)
+    fases = {"plan_series": "serie"}
+    for rol in flujo.contexto:
+        fases[definiciones[rol].nodo] = "contexto"
+    fases[definiciones[ROLE_SCRIPTWRITER].nodo] = "escritura"
+    for rol in flujo.transformaciones:
+        fases[definiciones[rol].nodo] = "transformacion"
+    if flujo.revisor is not None:
+        fases[definiciones[flujo.revisor].nodo] = "compuerta"
+    for rol in flujo.enriquecimiento:
+        fases[definiciones[rol].nodo] = "enriquecimiento"
+    fases.update({nodo: "cierre" for nodo in _CIERRE_DESCRIPCIONES})
+    return fases
+
+
+def _llm_resuelto(proyecto: ProjectSpec, rol: str) -> Dict[str, Any]:
+    """LLMConfig del rol (§4): proyecto > entorno > default, con ``tools``.
+
+    ``top_p``/``max_tokens`` ausentes no viajan en el dict (default del
+    proveedor), espejo exacto de lo que ``build_provider_model`` recibirá.
+    """
+    config = proyecto.config_de_agente(rol)
+    spec = resolve_role_spec(default_role_spec(rol), config)
+    llm: Dict[str, Any] = {
+        "proveedor": spec.provider,
+        "modelo": spec.model,
+        "temperatura": spec.temperature,
+        "tools": list(config.tools),
+    }
+    if spec.top_p is not None:
+        llm["top_p"] = spec.top_p
+    if spec.max_tokens is not None:
+        llm["max_tokens"] = spec.max_tokens
+    return llm
+
+
+def _red_efectiva(proyecto: ProjectSpec) -> Dict[str, Any]:
+    """Hidratación completa de la escena 3D para un proyecto (§5.1).
+
+    La topología se deriva de ``grafo.get_graph()`` —la misma fuente que el
+    Mermaid de ``flujo-efectivo``— anotando cada nodo con su definición del
+    registro/catálogo custom y el ``LLMConfig`` resuelto por rol. El wiring
+    del grafo jamás se re-declara aquí ni en el cliente.
+    """
+    flujo = resolver_flujo(proyecto)
+    grafo = build_pipeline_graph(_GatewayNulo(), proyecto)
+    dibujo = grafo.get_graph()
+    definiciones = definiciones_del_proyecto(proyecto)
+    nodo_a_rol = {d.nodo: rol for rol, d in definiciones.items()}
+    fases = _fases_del_flujo(proyecto, flujo)
+    nodo_compuerta = definiciones[flujo.revisor].nodo if flujo.revisor else None
+
+    nodes: List[Dict[str, Any]] = []
+    for nid in dibujo.nodes:
+        if nid in ("__start__", "__end__"):
+            continue  # anclas discretas: solo aparecen como extremos de aristas
+        rol = nodo_a_rol.get(nid)
+        if rol is None:
+            nodes.append({
+                "id": nid,
+                "rol": None,
+                "tipo": "cierre",
+                "fase": fases[nid],
+                "estructural": True,
+                "descripcion": _CIERRE_DESCRIPCIONES[nid],
+                "esencial": False,
+                "llm": None,
+            })
+            continue
+        definicion = definiciones[rol]
+        config = proyecto.config_de_agente(rol)
+        node: Dict[str, Any] = {
+            "id": nid,
+            "rol": rol,
+            "tipo": definicion.tipo,
+            "fase": fases[nid],
+            "estructural": nid in ("plan_series", nodo_compuerta),
+            "descripcion": definicion.descripcion,
+            "esencial": definicion.esencial,
+            "llm": _llm_resuelto(proyecto, rol),
+        }
+        if config.es_custom:
+            node["custom"] = {
+                "contrato": config.contrato,
+                "entradas": list(config.entradas),
+                "instrucciones": config.instrucciones,
+            }
+        nodes.append(node)
+
+    edges: List[Dict[str, Any]] = []
+    por_par: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for arista in dibujo.edges:
+        par = por_par.setdefault(
+            (arista.source, arista.target), {"condicional": False, "labels": []}
+        )
+        if arista.conditional:
+            par["condicional"] = True
+            if arista.data:
+                par["labels"].append(arista.data)
+    for (origen, destino), info in por_par.items():
+        edges.append({
+            "id": f"{origen}->{destino}",
+            "from": origen,
+            "to": destino,
+            "condicional": info["condicional"],
+            "labels": info["labels"],
+        })
+
+    return {
+        "project_id": proyecto.project_id,
+        "declarado": flujo.declarado,
+        "hasta": flujo.hasta,
+        "nodes": nodes,
+        "edges": edges,
+        "limite_recursion": limite_de_recursion(flujo, 3, 2),
+    }
 
 
 def create_app(
@@ -107,6 +288,7 @@ def create_app(
         audit_root=data_dir / "auditoria",
         lore_root=data_dir / "continuidad",
         project_loader=project_store.load,
+        spec_reader=project_store.read_raw,
     )
     lore_store = JsonLoreStore(root=data_dir / "continuidad")
     worker.start()
@@ -220,11 +402,6 @@ def create_app(
         """
         proyecto = _proyecto_o_404(project_id)
         flujo = resolver_flujo(proyecto)
-
-        class _GatewayNulo:  # el diagrama nunca genera contenido
-            def generate(self, *_a, **_k):  # pragma: no cover
-                raise RuntimeError("El diagrama del grafo no ejecuta el pipeline.")
-
         grafo = build_pipeline_graph(_GatewayNulo(), proyecto)
         customs = [
             {
@@ -252,6 +429,16 @@ def create_app(
             "limite_recursion": limite_de_recursion(flujo, 3, 2),
             "mermaid": grafo.get_graph().draw_mermaid(),
         }
+
+    @app.get("/api/projects/{project_id}/red")
+    def project_red(project_id: str) -> dict:
+        """Red efectiva de agentes del proyecto (hidratación de la escena 3D).
+
+        Nodos + aristas del grafo compilado con un gateway nulo (nunca genera
+        contenido), anotados con el registro de agentes y el ``LLMConfig``
+        resuelto por rol. La derivación vive en ``_red_efectiva``.
+        """
+        return _red_efectiva(_proyecto_o_404(project_id))
 
     @app.get("/api/projects/{project_id}/lore")
     def project_lore(project_id: str) -> list[dict]:
@@ -292,6 +479,31 @@ def create_app(
             respuesta.append(item)
         return respuesta
 
+    @app.get("/api/meta/catalogos")
+    def meta_catalogos() -> dict:
+        """Catálogos para los formularios de la web (spec-red-3d §5).
+
+        Proveedores con sus modelos sugeridos (los que usan los defaults del
+        sistema), tools integradas, hitos del pipeline y el vocabulario de los
+        agentes custom (tipos, contratos, entradas).
+        """
+        modelos: Dict[str, List[str]] = {proveedor: [] for proveedor in PROVEEDORES}
+        for spec in (*DEFAULT_ROLE_SPECS, DEFAULT_CUSTOM_ROLE_SPEC):
+            if spec.model not in modelos[spec.provider]:
+                modelos[spec.provider].append(spec.model)
+        return {
+            "proveedores": list(PROVEEDORES),
+            "modelos": modelos,
+            "tools": [
+                {"nombre": tool.nombre, "descripcion": tool.descripcion}
+                for tool in TOOLS_INTEGRADAS.values()
+            ],
+            "hitos": list(ALCANCES),
+            "tipos_custom": list(TIPOS_CUSTOM),
+            "contratos": sorted(CONTRATOS_VALIDOS),
+            "entradas_custom": sorted(CATALOGO_ENTRADAS),
+        }
+
     @app.post("/api/series", status_code=202)
     def create_series(cuerpo: SeriesRequestBody, x_owner: Optional[str] = Header(None)) -> dict:
         proyecto = _proyecto_o_404(cuerpo.project_id)
@@ -318,18 +530,121 @@ def create_app(
     ) -> list[dict]:
         owner = _owner(x_owner)
         return [
-            j.to_dict(with_deliverable=False)
+            _job_dict(j)
             for j in store.list_jobs(owner, project_id=project_id)
             if j.owner == owner
         ]
 
     @app.get("/api/jobs/{job_id}")
     def get_job(job_id: str) -> dict:
-        return _job_or_404(job_id).to_dict()
+        return _job_dict(_job_or_404(job_id), with_deliverable=True)
+
+    def _job_dict(job: Job, with_deliverable: bool = False) -> dict:
+        """Forma §4 del Job, con ``spec_desfasado`` (§11.4): para jobs en
+        curso, True si el TOML cambió desde que se congeló su huella."""
+        datos = job.to_dict(with_deliverable=with_deliverable)
+        if job.status is JobStatus.RUNNING:
+            desfasado = False
+            if job.spec_fingerprint is not None:
+                try:
+                    vigente = fingerprint_spec(project_store.read_raw(job.project_id))
+                    desfasado = vigente != job.spec_fingerprint
+                except Exception:  # noqa: BLE001 - sin TOML legible no se afirma nada
+                    logger.warning(
+                        "No se pudo recalcular el fingerprint del job %s.",
+                        job.job_id, exc_info=True,
+                    )
+            datos["spec_desfasado"] = desfasado
+        return datos
+
+    @app.get("/api/jobs/{job_id}/events/history")
+    def job_events_history(job_id: str, since: int = 0) -> list[dict]:
+        """Timeline completa del job (mismos registros que el SSE, §6.3)."""
+        _job_or_404(job_id)
+        return [_evento_dict(ev) for ev in store.events_since(job_id, since)]
+
+    # ----------------------- Auditoría / artefactos -----------------------
+
+    def _audit_dir_del_job(job: Job) -> Path:
+        return getattr(worker, "audit_root", Path("auditoria")) / job.project_id / (
+            f"serie_{job.job_id}"
+        )
+
+    @app.get("/api/jobs/{job_id}/artifacts")
+    def job_artifacts(job_id: str) -> list[dict]:
+        """Pasos de auditoría del job (§5): lista para el timeline del inspector."""
+        job = _job_or_404(job_id)
+        carpeta = _audit_dir_del_job(job)
+        if not carpeta.is_dir():
+            return []
+        pasos = []
+        for archivo in sorted(carpeta.glob("[0-9][0-9][0-9]_*.txt")):
+            if archivo.stem.endswith("_prompts"):
+                continue
+            n, paso, resumen = _parsear_paso(archivo)
+            pasos.append({"n": n, "paso": paso, "resumen": resumen})
+        return pasos
+
+    @app.get("/api/jobs/{job_id}/artifacts/{n}")
+    def job_artifact(job_id: str, n: int) -> dict:
+        """Un paso parseado: resumen, artefacto JSON y prompts (§7.4)."""
+        job = _job_or_404(job_id)
+        carpeta = _audit_dir_del_job(job)
+        destino = next(
+            (a for a in carpeta.glob(f"{n:03d}_*.txt") if not a.stem.endswith("_prompts")),
+            None,
+        )
+        if destino is None:
+            raise HTTPException(404, f"El job '{job_id}' no tiene paso {n:03d}.")
+        n_leido, paso, resumen, artefacto = _parsear_paso(destino, con_artefacto=True)
+        prompts_archivo = next(carpeta.glob(f"{n:03d}_*_prompts.txt"), None)
+        return {
+            "n": n_leido,
+            "paso": paso,
+            "resumen": resumen,
+            "artefacto": artefacto,
+            "prompts": (
+                prompts_archivo.read_text(encoding="utf-8")
+                if prompts_archivo is not None
+                else None
+            ),
+        }
+
+    def _parsear_paso(archivo: Path, con_artefacto: bool = False):
+        lineas = archivo.read_text(encoding="utf-8").splitlines()
+        # Encabezado: "Paso NNN · <paso>"; resumen tras la línea de fecha.
+        titulo = lineas[0] if lineas else ""
+        n = int(titulo.split("·")[0].split()[-1]) if "·" in titulo else 0
+        paso = titulo.split("·", 1)[1].strip() if "·" in titulo else archivo.stem
+        try:
+            resumen = lineas[3]
+        except IndexError:
+            resumen = ""
+        artefacto = None
+        if con_artefacto and "Artefacto generado (JSON):" in lineas:
+            desde = lineas.index("Artefacto generado (JSON):") + 1
+            try:
+                artefacto = json.loads("\n".join(lineas[desde:]).strip() or "null")
+            except json.JSONDecodeError:
+                artefacto = None
+        return (n, paso, resumen, artefacto) if con_artefacto else (n, paso, resumen)
+
+    def _evento_dict(ev) -> dict:
+        """Forma §4 del RuntimeExecutionEvent: kind/job_id/ts + mensaje
+        legacy o payload estructurado fusionado."""
+        datos: Dict[str, Any] = {
+            "kind": ev.kind, "job_id": ev.job_id, "ts": ev.ts,
+        }
+        if ev.payload is not None:
+            datos.update(ev.payload)
+        else:
+            datos["mensaje"] = ev.message
+        return datos
 
     @app.get("/api/jobs/{job_id}/events")
     async def job_events(job_id: str) -> StreamingResponse:
-        """Progreso en vivo vía Server-Sent Events (stream de eventos JSON)."""
+        """Progreso en vivo vía Server-Sent Events (§6.3): el frame conserva
+        `id:` y `event: <kind>`; `data` es JSON con el kind y su payload."""
         _job_or_404(job_id)
 
         async def stream():
@@ -338,7 +653,8 @@ def create_app(
                 eventos = store.events_since(job_id, last_id)
                 for ev in eventos:
                     last_id = ev.id
-                    yield f"id: {ev.id}\nevent: {ev.kind}\ndata: {ev.message}\n\n"
+                    data = json.dumps(_evento_dict(ev), ensure_ascii=False)
+                    yield f"id: {ev.id}\nevent: {ev.kind}\ndata: {data}\n\n"
                 job = store.get_job(job_id)
                 if job is not None and job.status in TERMINAL_STATUSES and not eventos:
                     yield "event: end\ndata: fin\n\n"
@@ -373,8 +689,21 @@ def create_app(
     # --------------------------------- web ---------------------------------
 
     @app.get("/", response_class=HTMLResponse)
-    def index() -> FileResponse:
-        return FileResponse(STATIC_DIR / "index.html")
+    def index():
+        # UI 3D (web/dist) si hay build; si no, la página "sin construir".
+        dist_index = WEB_DIST_DIR / "index.html"
+        if dist_index.is_file():
+            return FileResponse(dist_index)
+        return HTMLResponse(_SIN_BUILD)
+
+    @app.get("/assets/{ruta:path}", include_in_schema=False)
+    def assets(ruta: str) -> FileResponse:
+        # Assets del build de Vite (JS/CSS). Con el legacy, esta ruta no existe.
+        destino = (WEB_DIST_DIR / "assets" / ruta).resolve()
+        raiz_assets = (WEB_DIST_DIR / "assets").resolve()
+        if destino.is_file() and destino.is_relative_to(raiz_assets):
+            return FileResponse(destino)
+        raise HTTPException(404, "Asset no encontrado (¿falta `npm run build` en web/?)")
 
     return app
 
