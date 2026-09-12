@@ -1,0 +1,81 @@
+# Entorno de desarrollo completo (issue #14): API + web con hot reload.
+#
+#   cp .env.example .env   # claves LLM (o vacío: la API levanta igual)
+#   docker compose up      # web: http://localhost:5173 — API: http://localhost:8000
+#
+# El código se edita en el host y se recarga sin rebuild (monta de volúmenes);
+# cambiar dependencias sí: docker compose build api web.
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      # Claves LLM y overrides opcionales (LLM_*, OLLAMA_HOST). No requiere .env.
+      - path: .env
+        required: false
+    environment:
+      # Fijos dentro del contenedor: pisan lo que diga .env (la API debe
+      # escuchar en todas las interfaces y usar las rutas montadas).
+      SINNEMA_HOST: 0.0.0.0
+      SINNEMA_PORT: "8000"
+      SINNEMA_DATA_DIR: /data
+      SINNEMA_PROJECTS_DIR: /app/proyectos
+      SINNEMA_RELOAD: "1"
+      SINNEMA_LOG_LEVEL: ${SINNEMA_LOG_LEVEL:-INFO}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./sinnema:/app/sinnema:ro # hot reload del backend (SINNEMA_RELOAD=1)
+      - ./proyectos:/app/proyectos # TOML de shows: editar sin rebuild
+      - ./datos-servidor:/data # SQLite, lore, auditoría: sobreviven a down/up
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    environment:
+      # Dentro de la red de compose la API es `api:8000`; sin Docker, el
+      # default de vite.config.ts sigue siendo http://127.0.0.1:8000.
+      VITE_API_PROXY_TARGET: http://api:8000
+    ports:
+      - "5173:5173"
+    volumes:
+      # Solo código y configs: node_modules vive en la imagen (npm ci).
+      - ./web/src:/app/src
+      - ./web/index.html:/app/index.html
+      - ./web/vite.config.ts:/app/vite.config.ts
+      - ./web/tailwind.config.js:/app/tailwind.config.js
+      - ./web/postcss.config.js:/app/postcss.config.js
+      - ./web/tsconfig.json:/app/tsconfig.json
+      - ./web/tsconfig.node.json:/app/tsconfig.node.json
+    depends_on:
+      api:
+        condition: service_healthy
+
+  # Ollama contenedorizado (opcional): docker compose --profile ollama up -d
+  # Tras el primer arranque: docker compose exec ollama ollama pull <modelo>
+  # y en .env: OLLAMA_HOST=http://ollama:11434
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["ollama"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+
+volumes:
+  ollama-models:
