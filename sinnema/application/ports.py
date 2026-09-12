@@ -15,6 +15,7 @@ from sinnema.domain.models import (
     ContinuityDirectives,
     LoreEntry,
     QualityAudit,
+    RecursoAncla,
     ScriptDraft,
     SeriesPlan,
     TechnicalPackage,
@@ -123,6 +124,34 @@ class NullLoreStore:
         return []
 
     def save(self, project_id: str, entries: List[LoreEntry]) -> None:
+        return None
+
+
+class AnchorStorePort(Protocol):
+    """Puerto de la biblioteca de recursos ancla de cada proyecto.
+
+    La biblioteca (spec-recursos-ancla §4.2) vive ANTES de cada corrida: la
+    siembra y lockea una persona desde la web, y el pipeline solo la lee.
+    Cómo y dónde se guarda es cosa del adaptador (p. ej. un JSON + carpeta
+    de media por proyecto).
+    """
+
+    def load(self, project_id: str) -> List[RecursoAncla]:
+        """Devuelve las anclas del proyecto (vacío si no hay biblioteca)."""
+        ...
+
+    def save(self, project_id: str, anclas: List[RecursoAncla]) -> None:
+        """Reemplaza la biblioteca almacenada del proyecto por ``anclas``."""
+        ...
+
+
+class NullAnchorStore:
+    """Implementación no-op: cada corrida ve una biblioteca vacía y no persiste."""
+
+    def load(self, project_id: str) -> List[RecursoAncla]:
+        return []
+
+    def save(self, project_id: str, anclas: List[RecursoAncla]) -> None:
         return None
 
 
