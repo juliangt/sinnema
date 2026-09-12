@@ -33,13 +33,20 @@ TERMINAL_STATUSES = {JobStatus.COMPLETED, JobStatus.FAILED}
 
 @dataclass
 class JobEvent:
-    """Un latido de progreso dentro de la ejecución de un job."""
+    """Un latido de progreso dentro de la ejecución de un job.
+
+    ``payload`` (spec-red-3d §6.1) transporta el detalle estructurado de los
+    kinds nuevos (``node_start``/``node_end``/``token``/``tool_*``); es
+    ``None`` en los eventos legacy (``progress``/``error``/``done``) y en los
+    registros previos a la migración, que siguen legibles como solo texto.
+    """
 
     id: int
     job_id: str
     ts: str
-    kind: str  # "progress" | "error" | "done"
+    kind: str  # "progress" | "error" | "done" | "node_start" | "node_end" | ...
     message: str
+    payload: Optional[dict] = None
 
 
 @dataclass
@@ -58,6 +65,9 @@ class Job:
     finished_at: Optional[str] = None
     error: Optional[str] = None
     deliverable: Optional[dict] = field(default=None)
+    #: Huella sha256 del spec congelado al arrancar (spec-red-3d §11.4); la
+    #: API la compara contra el TOML vigente para calcular ``spec_desfasado``.
+    spec_fingerprint: Optional[str] = None
 
     def to_dict(self, with_deliverable: bool = True) -> dict:
         datos = {
@@ -125,6 +135,25 @@ class SqliteJobStore:
                     ON job_events(job_id, id);
                 """
             )
+            # Migración aditiva e idempotente (spec-red-3d §6.1, §12.1): las
+            # ALTERs solo se aplican si la columna falta, de modo que bases
+            # existentes de datos-servidor/ siguen operativas.
+            columnas_jobs = {
+                f["name"]
+                for f in self._conn.execute("PRAGMA table_info(jobs)").fetchall()
+            }
+            if "spec_fingerprint" not in columnas_jobs:
+                self._conn.execute(
+                    "ALTER TABLE jobs ADD COLUMN spec_fingerprint TEXT"
+                )
+            columnas_eventos = {
+                f["name"]
+                for f in self._conn.execute("PRAGMA table_info(job_events)").fetchall()
+            }
+            if "payload" not in columnas_eventos:
+                self._conn.execute(
+                    "ALTER TABLE job_events ADD COLUMN payload TEXT"
+                )
 
     # --------------------------------- jobs ---------------------------------
 
@@ -148,7 +177,10 @@ class SqliteJobStore:
         )
         with self._lock, self._conn:
             self._conn.execute(
-                "INSERT INTO jobs VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO jobs (job_id, owner, project_id, topic,"
+                " num_chapters, max_critique_attempts, status, created_at,"
+                " started_at, finished_at, error, deliverable)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     job.job_id, job.owner, job.project_id, job.topic,
                     job.num_chapters, job.max_critique_attempts,
@@ -216,11 +248,23 @@ class SqliteJobStore:
 
     # -------------------------------- eventos --------------------------------
 
-    def add_event(self, job_id: str, kind: str, message: str) -> None:
+    def add_event(
+        self,
+        job_id: str,
+        kind: str,
+        message: str,
+        payload: Optional[dict] = None,
+    ) -> None:
+        """Registra un evento; ``payload`` (§6.1) es opcional y solo lo
+        traen los kinds estructurados. La firma anterior queda intacta."""
         with self._lock, self._conn:
             self._conn.execute(
-                "INSERT INTO job_events (job_id, ts, kind, message) VALUES (?,?,?,?)",
-                (job_id, _now(), kind, message),
+                "INSERT INTO job_events (job_id, ts, kind, message, payload)"
+                " VALUES (?,?,?,?,?)",
+                (
+                    job_id, _now(), kind, message,
+                    json.dumps(payload, ensure_ascii=False) if payload is not None else None,
+                ),
             )
 
     def events_since(self, job_id: str, last_id: int = 0) -> List[JobEvent]:
@@ -230,10 +274,23 @@ class SqliteJobStore:
                 (job_id, last_id),
             ).fetchall()
         return [
-            JobEvent(id=f["id"], job_id=f["job_id"], ts=f["ts"],
-                     kind=f["kind"], message=f["message"])
+            JobEvent(
+                id=f["id"], job_id=f["job_id"], ts=f["ts"],
+                kind=f["kind"], message=f["message"],
+                payload=json.loads(f["payload"]) if f["payload"] else None,
+            )
             for f in filas
         ]
+
+    # ------------------------------ fingerprint ------------------------------
+
+    def set_spec_fingerprint(self, job_id: str, fingerprint: str) -> None:
+        """Congela en el job la huella del spec con el que arrancó (§11.4)."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE jobs SET spec_fingerprint = ? WHERE job_id = ?",
+                (fingerprint, job_id),
+            )
 
     # ------------------------------- internals -------------------------------
 
@@ -252,4 +309,5 @@ class SqliteJobStore:
             finished_at=f["finished_at"],
             error=f["error"],
             deliverable=json.loads(f["deliverable"]) if f["deliverable"] else None,
+            spec_fingerprint=f["spec_fingerprint"],
         )
