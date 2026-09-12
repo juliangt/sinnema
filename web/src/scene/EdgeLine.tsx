@@ -13,8 +13,7 @@ import type { Posicion } from './layout'
 
 interface Props {
   edge: EdgeTransition
-  desde: Posicion
-  hacia: Posicion
+  curva: THREE.QuadraticBezierCurve3
 }
 
 /** Inicio/fin del muestreo: evita atravesar la geometría del nodo y al cono. */
@@ -49,9 +48,7 @@ export function curvaDeArista(desde: Posicion, hacia: Posicion): THREE.Quadratic
   return new THREE.QuadraticBezierCurve3(inicio, control, fin)
 }
 
-export function EdgeLine({ edge, desde, hacia }: Props) {
-  const curva = useMemo(() => curvaDeArista(desde, hacia), [desde, hacia])
-
+export function EdgeLine({ edge, curva }: Props) {
   const puntos = useMemo(
     () =>
       curva
