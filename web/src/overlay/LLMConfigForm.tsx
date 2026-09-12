@@ -5,6 +5,7 @@
 // un payload que el backend rechazaría.
 
 import { useEffect, useMemo, useState } from 'react'
+import { validarConfigLLM, TEMPERATURA_MIN, TEMPERATURA_MAX, PASO_TEMPERATURA, TOP_P_MIN, TOP_P_MAX, PASO_TOP_P } from '../lib/validaciones'
 import { api } from '../api/client'
 import { useProjectStore } from '../stores/projectStore'
 import type { AgentNode } from '../types'
@@ -13,13 +14,6 @@ interface Props {
   nodo: AgentNode
   onGuardado: () => void
 }
-
-const TEMPERATURA_MIN = 0
-const TEMPERATURA_MAX = 2
-const PASO_TEMPERATURA = 0.05
-const TOP_P_MIN = 0
-const TOP_P_MAX = 1
-const PASO_TOP_P = 0.01
 
 export function LLMConfigForm({ nodo, onGuardado }: Props) {
   const proyectoActivo = useProjectStore((s) => s.proyectoActivo)
@@ -83,26 +77,21 @@ export function LLMConfigForm({ nodo, onGuardado }: Props) {
       .catch(() => setPreview(null))
   }, [esCustom, proyectoActivo, nodo.rol, nodo.id])
 
-  // Validaciones espejo del backend (§3).
-  const errores = useMemo(() => {
-    const lista: string[] = []
-    if (modelo.trim() === '') lista.push('modelo: no puede estar vacío')
-    if (temperatura < TEMPERATURA_MIN || temperatura > TEMPERATURA_MAX) {
-      lista.push(`temperatura: fuera de [${TEMPERATURA_MIN}, ${TEMPERATURA_MAX}]`)
-    }
-    if (topPActivado && (topP < TOP_P_MIN || topP > TOP_P_MAX)) {
-      lista.push(`top_p: fuera de [${TOP_P_MIN}, ${TOP_P_MAX}]`)
-    }
-    if (maxTokensActivado && (!Number.isInteger(maxTokens) || maxTokens <= 0)) {
-      lista.push('max_tokens: debe ser un entero > 0')
-    }
-    const disponibles = new Set(catalogos?.tools.map((t) => t.nombre) ?? [])
-    const desconocidas = tools.filter((t) => !disponibles.has(t))
-    if (desconocidas.length > 0) {
-      lista.push(`tools fuera del registro: ${desconocidas.join(', ')}`)
-    }
-    return lista
-  }, [modelo, temperatura, topPActivado, topP, maxTokensActivado, maxTokens, tools, catalogos])
+  // Validaciones espejo del backend (§3), función pura de lib/validaciones.
+  const errores = useMemo(
+    () =>
+      validarConfigLLM({
+        modelo,
+        temperatura,
+        topPActivado,
+        topP,
+        maxTokensActivado,
+        maxTokens,
+        tools,
+        toolsDisponibles: catalogos?.tools.map((t) => t.nombre) ?? [],
+      }),
+    [modelo, temperatura, topPActivado, topP, maxTokensActivado, maxTokens, tools, catalogos],
+  )
 
   const guardar = async (): Promise<void> => {
     if (proyectoActivo === null || detalle === null || errores.length > 0) return
