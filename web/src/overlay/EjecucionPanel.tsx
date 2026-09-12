@@ -3,7 +3,7 @@
 // El timeline se alimenta del log reactivo del executionStore (frecuencia de
 // UI); el streaming de tokens vive en los buffers mutables (§10).
 
-import { useEffect, useState } from 'react'
+import { Fragment, useEffect, useState } from 'react'
 import { api } from '../api/client'
 import { useExecutionStore } from '../stores/executionStore'
 import { useExecutionSync } from '../hooks/useExecutionSync'
@@ -85,19 +85,31 @@ export function EjecucionPanel() {
           {jobs.length > 0 && (
             <div className="flex gap-1 overflow-x-auto border-b border-borde/50 px-3 py-1.5">
               {jobs.slice(0, 6).map((job) => (
-                <button
-                  key={job.job_id}
-                  type="button"
-                  onClick={() => useExecutionStore.getState().iniciar(job.job_id)}
-                  className={`shrink-0 rounded border px-1.5 py-0.5 text-[10px] transition-colors ${
-                    job.job_id === jobId
-                      ? 'border-acento text-acento'
-                      : 'border-borde text-texto-suave hover:bg-panel-alto'
-                  }`}
-                  title={`${job.status} · ${job.topic}`}
-                >
-                  {job.job_id.slice(0, 6)}·{job.status === 'running' ? '▶' : job.status[0]}
-                </button>
+                <Fragment key={job.job_id}>
+                  <button
+                    type="button"
+                    onClick={() => useExecutionStore.getState().iniciar(job.job_id)}
+                    className={`shrink-0 rounded border px-1.5 py-0.5 text-[10px] transition-colors ${
+                      job.job_id === jobId
+                        ? 'border-acento text-acento'
+                        : 'border-borde text-texto-suave hover:bg-panel-alto'
+                    }`}
+                    title={`${job.status} · ${job.topic}`}
+                  >
+                    {job.job_id.slice(0, 6)}·{job.status === 'running' ? '▶' : job.status[0]}
+                  </button>
+                  {job.status === 'completed' && (
+                    <a
+                      href={`/api/jobs/${job.job_id}/viewer`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="shrink-0 self-center text-[10px] text-acento hover:underline"
+                      title="Abrir el visor del entregable"
+                    >
+                      visor ↗
+                    </a>
+                  )}
+                </Fragment>
               ))}
             </div>
           )}

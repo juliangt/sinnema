@@ -64,6 +64,26 @@ export const api = {
     return pedir(`/api/projects/${encodeURIComponent(id)}/prompts`)
   },
 
+  /** POST /api/projects — crea un proyecto (dict TOML completo). */
+  crearProyecto(datos: ProjectDetail): Promise<{ project_id: string }> {
+    return pedir('/api/projects', { method: 'POST', body: JSON.stringify(datos) })
+  },
+
+  /** DELETE /api/projects/{id} — borra el TOML (409 si hay jobs activos). */
+  borrarProyecto(id: string): Promise<void> {
+    return pedir(`/api/projects/${encodeURIComponent(id)}`, { method: 'DELETE' })
+  },
+
+  /** GET /api/projects/{id}/lore — memoria de continuidad. */
+  lore(id: string): Promise<{ project_id: string; entradas: { term: string; definition: string; chapter_id: string }[] }> {
+    return pedir(`/api/projects/${encodeURIComponent(id)}/lore`)
+  },
+
+  /** DELETE /api/projects/{id}/lore — reinicia la memoria de continuidad. */
+  reiniciarLore(id: string): Promise<void> {
+    return pedir(`/api/projects/${encodeURIComponent(id)}/lore`, { method: 'DELETE' })
+  },
+
   // ─────────────────────── Jobs y ejecución (§5) ───────────────────────
 
   /** POST /api/series — lanza una corrida del proyecto (202 con job_id). */
