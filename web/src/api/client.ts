@@ -51,6 +51,19 @@ export const api = {
     return pedir<Catalogos>('/api/meta/catalogos')
   },
 
+  /** PUT /api/projects/{id} — persiste el dict TOML completo (§11.1). */
+  actualizarProyecto(id: string, datos: ProjectDetail): Promise<{ actualizado: boolean }> {
+    return pedir(`/api/projects/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: JSON.stringify(datos),
+    })
+  },
+
+  /** GET /api/projects/{id}/prompts — preview de prompts compuestos. */
+  prompts(id: string): Promise<Record<string, unknown>> {
+    return pedir(`/api/projects/${encodeURIComponent(id)}/prompts`)
+  },
+
   // ─────────────────────── Jobs y ejecución (§5) ───────────────────────
 
   /** POST /api/series — lanza una corrida del proyecto (202 con job_id). */

@@ -14,6 +14,7 @@ interface Estado {
  */
 export function useProjectNetwork(projectId: string | null): Estado {
   const [estado, setEstado] = useState<Estado>({ cargando: false, error: null })
+  const version = useProjectStore((s) => s.version)
 
   useEffect(() => {
     if (projectId === null) {
@@ -35,7 +36,7 @@ export function useProjectNetwork(projectId: string | null): Estado {
     return () => {
       cancelado = true
     }
-  }, [projectId])
+  }, [projectId, version])
 
   return estado
 }
