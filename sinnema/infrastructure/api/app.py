@@ -61,6 +61,12 @@ from sinnema.application.requests import MAX_CRITIQUE_ATTEMPTS_LIMIT
 from sinnema.application.tools import TOOLS_INTEGRADAS
 from sinnema.application.use_cases import limite_de_recursion
 from sinnema.domain.constants import ALCANCES, SERIES_MAX_CHAPTERS
+from sinnema.domain.models.anclas import (
+    BATERIA_MINIMA,
+    ESTADOS_DE_ANCLA,
+    ROLES_POR_TIPO,
+    TIPOS_DE_ANCLA,
+)
 from sinnema.infrastructure.api.viewer import render_deliverable_html
 from sinnema.infrastructure.anclas import JsonAnchorStore
 from sinnema.infrastructure.llm.providers import (
@@ -488,8 +494,11 @@ def create_app(
         """Catálogos para los formularios de la web (spec-red-3d §5).
 
         Proveedores con sus modelos sugeridos (los que usan los defaults del
-        sistema), tools integradas, hitos del pipeline y el vocabulario de los
-        agentes custom (tipos, contratos, entradas).
+        sistema), tools integradas, hitos del pipeline, vocabulario de los
+        agentes custom (tipos, contratos, entradas) y catálogos de la
+        biblioteca de anclas (tipos, estados, roles por tipo y batería mínima
+        de lock, spec-recursos-ancla §9.1; los proveedores de media llegan con
+        su fase).
         """
         modelos: Dict[str, List[str]] = {proveedor: [] for proveedor in PROVEEDORES}
         for spec in (*DEFAULT_ROLE_SPECS, DEFAULT_CUSTOM_ROLE_SPEC):
@@ -506,6 +515,16 @@ def create_app(
             "tipos_custom": list(TIPOS_CUSTOM),
             "contratos": sorted(CONTRATOS_VALIDOS),
             "entradas_custom": sorted(CATALOGO_ENTRADAS),
+            "anclas": {
+                "tipos": list(TIPOS_DE_ANCLA),
+                "estados": list(ESTADOS_DE_ANCLA),
+                "roles_por_tipo": {
+                    tipo: list(roles) for tipo, roles in ROLES_POR_TIPO.items()
+                },
+                "bateria_minima": {
+                    tipo: list(roles) for tipo, roles in BATERIA_MINIMA.items()
+                },
+            },
         }
 
     @app.post("/api/series", status_code=202)

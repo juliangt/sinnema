@@ -520,6 +520,10 @@ class ProjectSpec:
     #: ``resolver_flujo`` aplica la semántica legacy (los 6 roles menos los
     #: ``activo = false``, que conservan su cortocircuito).
     flujo: Optional[FlowSpec] = None
+    #: Participación de la biblioteca de recursos ancla (clave ``anclas`` de
+    #: ``[visual]``, spec-recursos-ancla §4.3): ``false`` la ignora por
+    #: completo; default ``true`` (participación automática si hay lockeadas).
+    anclas: bool = True
 
     def config_de_agente(self, rol: str) -> AgentConfig:
         """Config del rol para este proyecto (vacía si no se declaró nada)."""
@@ -574,6 +578,12 @@ class ProjectSpec:
             problemas.append(
                 "El campo 'visual_master_style' debe describir el estilo visual "
                 f"maestro en inglés (mínimo {_VISUAL_MASTER_STYLE_MIN_CHARS} caracteres)."
+            )
+
+        if not isinstance(self.anclas, bool):
+            problemas.append(
+                "'anclas' en [visual] debe ser booleano (true por defecto; "
+                f"recibido: '{self.anclas}')."
             )
 
         for rol in sorted(ROLES_ESENCIALES & set(self.agentes)):
@@ -830,6 +840,26 @@ _CLAVES_FLUJO = frozenset(
 
 
 
+def _anclas_habilitadas(datos: Dict[str, Any], problemas: List[str]) -> bool:
+    """Parsea la clave opcional ``anclas`` de ``[visual]`` (default ``true``).
+
+    Opt-out de la biblioteca de recursos ancla (spec-recursos-ancla §4.3): sin
+    la clave (o sin sección ``[visual]``) el proyecto participa; ``false`` la
+    ignora por completo.
+    """
+    visual = datos.get("visual")
+    if not isinstance(visual, dict) or "anclas" not in visual:
+        return True
+    valor = visual["anclas"]
+    if not isinstance(valor, bool):
+        problemas.append(
+            "'anclas' en [visual] debe ser booleano "
+            f"(true por defecto; recibido: '{valor}')."
+        )
+        return True
+    return valor
+
+
 def _mapear_pipeline(datos: Dict[str, Any], problemas: List[str]) -> PipelineConfig:
     """Parsea la sección opcional ``[pipeline]``."""
     crudo = datos.get("pipeline")
@@ -955,6 +985,7 @@ def project_from_dict(datos: Dict[str, Any]) -> ProjectSpec:
     agentes = _mapear_agentes(datos, problemas)
     pipeline = _mapear_pipeline(datos, problemas)
     flujo = _mapear_flujo(datos, problemas)
+    anclas = _anclas_habilitadas(datos, problemas)
     if flujo is not None:
         # Semántica del flujo junto al resto de los problemas (§9: todos se
         # reportan de una vez al cargar el proyecto).
@@ -972,6 +1003,7 @@ def project_from_dict(datos: Dict[str, Any]) -> ProjectSpec:
         agentes=agentes,
         pipeline=pipeline,
         flujo=flujo,
+        anclas=anclas,
     )
     spec.validate()
     return spec
