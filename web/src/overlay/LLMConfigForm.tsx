@@ -38,6 +38,7 @@ export function LLMConfigForm({ nodo, onGuardado }: Props) {
   const [maxTokens, setMaxTokens] = useState(llm?.max_tokens ?? 4096)
   const [tools, setTools] = useState<string[]>(llm?.tools ?? [])
   const [reglas, setReglas] = useState('')
+  const [instrucciones, setInstrucciones] = useState(nodo.custom?.instrucciones ?? '')
 
   // Estado del guardado (§11.4): el aviso es persistente hasta el próximo cambio.
   const [guardando, setGuardando] = useState(false)
@@ -55,6 +56,7 @@ export function LLMConfigForm({ nodo, onGuardado }: Props) {
     setMaxTokensActivado(llm?.max_tokens !== undefined)
     setMaxTokens(llm?.max_tokens ?? 4096)
     setTools(llm?.tools ?? [])
+    setInstrucciones(nodo.custom?.instrucciones ?? '')
     setGuardado(false)
     setError(null)
   }, [llm, nodo.id])
@@ -126,6 +128,10 @@ export function LLMConfigForm({ nodo, onGuardado }: Props) {
         .filter((r) => r !== '')
       if (reglasLimpias.length > 0) config.reglas = reglasLimpias
       else delete config.reglas
+      if (nodo.custom !== undefined) {
+        if (instrucciones.trim() !== '') config.instrucciones = instrucciones.trim()
+        else delete config.instrucciones
+      }
 
       await api.actualizarProyecto(proyectoActivo, datos)
       setGuardado(true)
@@ -303,9 +309,15 @@ export function LLMConfigForm({ nodo, onGuardado }: Props) {
           <h4 className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-texto-suave">
             Instrucciones del custom
           </h4>
-          <p className="whitespace-pre-wrap text-[10px] leading-relaxed text-texto-suave">
-            {nodo.custom.instrucciones}
-          </p>
+          <textarea
+            rows={5}
+            value={instrucciones}
+            onChange={(e) => {
+              setInstrucciones(e.target.value)
+              setGuardado(false)
+            }}
+            className="w-full rounded border border-borde bg-panel-alto px-2 py-1 font-mono text-[10px] text-texto"
+          />
           {preview !== null && (
             <details className="mt-1">
               <summary className="cursor-pointer text-[10px] text-acento">
