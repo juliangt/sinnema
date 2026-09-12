@@ -162,3 +162,102 @@ def test_politica_de_reintentos_invalida_rechazada():
         RetryPolicy(max_retries=0)
     with pytest.raises(ValueError, match="backoff"):
         RetryPolicy(max_retries=1, backoff_seconds=-1)
+
+
+# ----------------- Streaming de tokens (red-3d §7.1) -----------------
+
+
+class FakeRunnableConStream(FakeRunnable):
+    """Runnable que además sabe hacer streaming: rinde parciales JSON."""
+
+    def __init__(self, resultado, parciales):
+        super().__init__(resultado)
+        self._parciales = parciales
+
+    def stream(self, mensajes):
+        # Parciales tipo langchain: instancias parciales del esquema. Para el
+        # test, dicts con el mismo efecto (model_dump no existe en dict, así
+        # que usamos instancias parciales reales del modelo).
+        yield from self._parciales
+
+
+class FakeChatStreaming(FakeChat):
+    """ChatModel cuyo runnable estructurado soporta stream."""
+
+    def __init__(self, resultado, parciales):
+        super().__init__(resultado)
+        self._parciales = parciales
+
+    def with_structured_output(self, schema):
+        assert schema is type(self._resultado)
+        self.runnable = FakeRunnableConStream(self._resultado, self._parciales)
+        return self.runnable
+
+
+def test_generate_sin_on_event_no_cambia():
+    """El camino sin eventos es el de siempre: invoke, cero tokens."""
+    eventos = []
+    gateway = LangChainStructuredGateway(clientes_completos(), RetryPolicy(1, 0.0))
+    plan = gateway.generate("planner", SeriesPlan, "sys", "usr")
+    assert isinstance(plan, SeriesPlan)
+    assert eventos == []
+
+
+def test_generate_con_on_event_emite_tokens_y_devuelve_objeto():
+    plan = make_plan(1)
+    parcial = SeriesPlan.model_construct(project_id="proyecto-de-prueba")
+    chat = FakeChatStreaming(plan, [parcial])
+    clientes = dict(clientes_completos())
+    clientes["planner"] = chat
+    gateway = LangChainStructuredGateway(clientes, RetryPolicy(1, 0.0))
+    eventos = []
+    resultado = gateway.generate(
+        "planner", SeriesPlan, "sys", "usr",
+        on_event=eventos.append,
+    )
+    assert isinstance(resultado, SeriesPlan)
+    assert [e["tipo"] for e in eventos] == ["token"]
+    # El texto del token es el render JSON del parcial (el cliente reemplaza buffer).
+    assert eventos[0]["texto"].startswith("{")
+
+
+def test_streaming_sin_soporte_cae_a_invoke():
+    """Proveedor sin stream estructurado (excepción al iniciar): fallback a
+    invoke y resultado válido."""
+    class SinStream(FakeRunnable):
+        def stream(self, mensajes):
+            raise NotImplementedError("este proveedor no streamea")
+
+    chat = FakeChat(make_plan(1))
+    chat.runnable = None
+
+    class ChatSinStream(FakeChat):
+        def with_structured_output(self, schema):
+            assert schema is type(self._resultado)
+            self.runnable = SinStream(self._resultado)
+            return self.runnable
+
+    clientes = dict(clientes_completos())
+    clientes["planner"] = ChatSinStream(make_plan(1))
+    gateway = LangChainStructuredGateway(clientes, RetryPolicy(1, 0.0))
+    eventos = []
+    resultado = gateway.generate(
+        "planner", SeriesPlan, "sys", "usr", on_event=eventos.append,
+    )
+    assert isinstance(resultado, SeriesPlan)
+    assert eventos == []  # el fallback solo emite node_start/node_end (runner)
+
+
+def test_event_sink_del_job_recibe_eventos_con_rol():
+    plan = make_plan(1)
+    parcial = SeriesPlan.model_construct(project_id="proyecto-de-prueba")
+    clientes = dict(clientes_completos())
+    clientes["planner"] = FakeChatStreaming(plan, [parcial])
+    recibidos = []
+    gateway = LangChainStructuredGateway(
+        clientes, RetryPolicy(1, 0.0), event_sink=lambda rol, ev: recibidos.append((rol, ev)),
+    )
+    resultado = gateway.generate("planner", SeriesPlan, "sys", "usr")
+    assert isinstance(resultado, SeriesPlan)
+    assert [rol for rol, _ in recibidos] == ["planner"]
+    assert all(ev["tipo"] == "token" for _, ev in recibidos)

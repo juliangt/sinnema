@@ -7,16 +7,17 @@ Responsabilidades de este adaptador (y de nadie más):
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Optional, Type, TypeVar
+from typing import Any, Callable, Dict, Mapping, Optional, Type, TypeVar
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel
 
-from sinnema.application.ports import ROLE_SCHEMAS
+from sinnema.application.ports import EventCallback, EventoGeneracion, ROLE_SCHEMAS
 from sinnema.application.projects import ProjectSpec, resolver_flujo
 from sinnema.application.registry import definiciones_del_proyecto
 from sinnema.infrastructure.llm.providers import build_role_clients
@@ -24,6 +25,10 @@ from sinnema.infrastructure.llm.providers import build_role_clients
 logger = logging.getLogger("sinnema.infrastructure.gateway")
 
 TSchema = TypeVar("TSchema")
+
+#: Sink de eventos por job (§7.1): ``(rol, evento)`` — el gateway sabe el rol;
+#: el nodo activo lo contextualiza quien construye el sink (el runner).
+EventSink = Callable[[str, EventoGeneracion], None]
 
 
 @dataclass(frozen=True)
@@ -50,8 +55,11 @@ class LangChainStructuredGateway:
         clients: Mapping[str, BaseChatModel],
         retry_policy: Optional[RetryPolicy] = None,
         schemas: Optional[Mapping[str, Type[BaseModel]]] = None,
+        event_sink: Optional[EventSink] = None,
     ) -> None:
         self._retry_policy = retry_policy or RetryPolicy()
+        #: Sink de eventos del job en curso (§7.1); None = sin streaming.
+        self._event_sink = event_sink
         #: Catálogo rol -> contrato. Por defecto, el del registro global; un
         #: proyecto con agentes custom aporta su catálogo extendido.
         self._schemas: Mapping[str, Type[BaseModel]] = (
@@ -80,6 +88,8 @@ class LangChainStructuredGateway:
         schema: Type[TSchema],
         system_prompt: str,
         user_prompt: str,
+        *,
+        on_event: Optional[EventCallback] = None,
     ) -> TSchema:
         if role not in self._structured:
             raise ValueError(
@@ -97,8 +107,28 @@ class LangChainStructuredGateway:
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_prompt),
         ]
+
+        def emitir(evento: EventoGeneracion) -> None:
+            # Dos canales equivalentes: el callback por invocación (§7.1) y
+            # el sink del job conectado en construcción (runner → job_events).
+            if on_event is not None:
+                on_event(evento)
+            if self._event_sink is not None:
+                self._event_sink(role, evento)
+
         ultimo_error: Optional[Exception] = None
         for intento in range(1, self._retry_policy.max_retries + 1):
+            if on_event is not None or self._event_sink is not None:
+                try:
+                    resultado = self._generar_streaming(role, schema, mensajes, emitir)
+                except Exception as exc:  # noqa: BLE001 - fallback §7.1
+                    logger.warning(
+                        "Rol '%s': streaming estructurado no disponible (%s: %s); "
+                        "fallback a invoke.", role, type(exc).__name__, exc,
+                    )
+                    resultado = None
+                if resultado is not None:
+                    return resultado
             try:
                 resultado = self._structured[role].invoke(mensajes)
             except Exception as exc:  # noqa: BLE001 - reintentamos cualquier fallo transitorio
@@ -121,6 +151,32 @@ class LangChainStructuredGateway:
             f"El LLM del rol '{role}' falló tras "
             f"{self._retry_policy.max_retries} intentos: {ultimo_error}"
         ) from ultimo_error
+
+    def _generar_streaming(
+        self,
+        role: str,
+        schema: Type[TSchema],
+        mensajes: list,
+        emitir: Callable[[EventoGeneracion], None],
+    ) -> Optional[BaseModel]:
+        """Intenta salida estructurada por streaming (§7.1): emite un evento
+        ``token`` por chunk (texto = render JSON del parcial, el cliente
+        reemplaza el buffer) y devuelve el objeto completo; ``None`` si el
+        stream no rindió una instancia válida del esquema. Si el proveedor no
+        soporta streaming, la excepción sube para el fallback a ``invoke``."""
+        final: Optional[BaseModel] = None
+        for parcial in self._structured[role].stream(mensajes):
+            final = parcial
+            emitir({
+                "tipo": "token",
+                "texto": json.dumps(
+                    parcial.model_dump(mode="json", exclude_none=True),
+                    ensure_ascii=False,
+                ),
+            })
+        if isinstance(final, schema):
+            return final
+        return None
 
 
 def _roles_con_cliente(project: ProjectSpec) -> list[str]:
@@ -159,6 +215,7 @@ def build_gateway(
     project: Optional[ProjectSpec] = None,
     role_clients: Optional[Mapping[str, BaseChatModel]] = None,
     retry_policy: Optional[RetryPolicy] = None,
+    event_sink: Optional[EventSink] = None,
 ) -> LangChainStructuredGateway:
     """Composition helper: resuelve clientes por rol y devuelve el gateway.
 
@@ -168,6 +225,9 @@ def build_gateway(
     truncado por ``hasta`` o desactivado en un proyecto legacy) no exige su
     clave de proveedor. Los agentes custom aportan su contrato genérico al
     catálogo de esquemas del gateway.
+
+    ``event_sink`` (§7.1) conecta el streaming del job una sola vez; ausente,
+    el gateway se comporta exactamente como siempre.
     """
     schemas: Optional[Mapping[str, Type[BaseModel]]] = None
     if role_clients is None:
@@ -176,4 +236,6 @@ def build_gateway(
         role_clients = build_role_clients(overrides=overrides, solo_roles=solo_roles)
     if project is not None:
         schemas = _esquemas_del_proyecto(project)
-    return LangChainStructuredGateway(dict(role_clients), retry_policy, schemas)
+    return LangChainStructuredGateway(
+        dict(role_clients), retry_policy, schemas, event_sink=event_sink,
+    )

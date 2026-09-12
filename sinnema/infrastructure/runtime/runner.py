@@ -11,6 +11,7 @@ los puertos.
 """
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import queue
@@ -175,6 +176,40 @@ class SeriesWorker:
         conn = sqlite3.connect(str(checkpoint_path), check_same_thread=False)
         try:
             checkpointer = SqliteSaver(conn)
+
+            # Streaming del job (§7.1): el gateway emite (rol, evento) y el
+            # runner los publica como eventos `token` con el nodo resuelto
+            # desde el rol (la misma correspondencia que anota /red).
+            nodo_a_rol = {
+                definicion.nodo: rol
+                for rol, definicion in definiciones_del_proyecto(proyecto).items()
+            }
+            rol_a_nodo = {rol: nodo for nodo, rol in nodo_a_rol.items()}
+
+            def sink_generacion(rol: str, evento: dict) -> None:
+                if evento.get("tipo") != "token":
+                    return
+                sink(
+                    "token", f"{rol} emite texto",
+                    payload={
+                        "node": rol_a_nodo.get(rol), "rol": rol,
+                        "texto": evento.get("texto", ""),
+                    },
+                )
+
+            # La factory puede ser la build_gateway del sistema (que acepta
+            # event_sink) o una inyectada por tests/CLI con firma (proyecto).
+            kwargs: dict = {}
+            try:
+                parametros = inspect.signature(self._gateway_factory).parameters
+                if "event_sink" in parametros or any(
+                    p.kind is inspect.Parameter.VAR_KEYWORD
+                    for p in parametros.values()
+                ):
+                    kwargs["event_sink"] = sink_generacion
+            except (TypeError, ValueError):
+                pass
+            gateway = self._gateway_factory(proyecto, **kwargs)
             use_case = GenerateSeriesUseCase(
                 gateway, proyecto,
                 settings=PipelineSettings(
@@ -188,11 +223,6 @@ class SeriesWorker:
             # Eventos por nodo (§7.2): el use case reporta qué nodos corrieron
             # por superstep y el runner los publica como node_start/node_end
             # con el rol y el paso; el texto `progress` se conserva como hoy.
-            nodo_a_rol = {
-                definicion.nodo: rol
-                for rol, definicion in definiciones_del_proyecto(proyecto).items()
-            }
-
             def on_nodo(nodo: str, claves: list, superstep: int) -> None:
                 base = {
                     "node": nodo,
