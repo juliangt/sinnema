@@ -5,6 +5,7 @@ import { useCatalogos } from './hooks/useCatalogos'
 import { useProjectNetwork } from './hooks/useProjectNetwork'
 import { SceneCanvas } from './scene/SceneCanvas'
 import { TopBar } from './overlay/TopBar'
+import { InspectorPanel } from './overlay/InspectorPanel'
 
 export default function App() {
   const proyectoActivo = useProjectStore((s) => s.proyectoActivo)
@@ -29,6 +30,7 @@ export default function App() {
     <div className="relative h-full w-full overflow-hidden bg-fondo">
       <SceneCanvas />
       <TopBar />
+      <InspectorPanel />
       {cargando && (
         <div className="pointer-events-none absolute inset-x-0 top-16 z-10 flex justify-center">
           <span className="rounded-full border border-borde bg-panel/90 px-4 py-1 text-xs text-texto-suave">

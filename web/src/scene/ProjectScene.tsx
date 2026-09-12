@@ -6,6 +6,8 @@ import { useMemo } from 'react'
 import type { EffectiveNetwork } from '../types'
 import { useSelectionStore } from '../stores/selectionStore'
 import { AgentNode3D } from './AgentNode3D'
+import { EdgeLine } from './EdgeLine'
+import { CameraRig } from './CameraRig'
 import { calcularLayout } from './layout'
 
 interface Props {
@@ -24,6 +26,13 @@ export function ProjectScene({ red }: Props) {
         args={[110, 55, '#22304a', '#141c2c']}
         position={[layout.caja.centro.x, -0.02, layout.caja.centro.z]}
       />
+      {red.edges.map((edge) => {
+        const desde = layout.posiciones[edge.from]
+        const hacia = layout.posiciones[edge.to]
+        // Una arista con extremo fuera del layout no se dibuja (defensivo).
+        if (desde === undefined || hacia === undefined) return null
+        return <EdgeLine key={edge.id} edge={edge} desde={desde} hacia={hacia} />
+      })}
       {red.nodes.map((nodo) => (
         <AgentNode3D
           key={nodo.id}
@@ -33,6 +42,7 @@ export function ProjectScene({ red }: Props) {
           conHover={hover === nodo.id}
         />
       ))}
+      <CameraRig layout={layout} />
     </group>
   )
 }

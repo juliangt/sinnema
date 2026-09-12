@@ -46,6 +46,7 @@ export function AgentNode3D({ nodo, posicion, seleccionado, conHover }: Props) {
   const haloRef = useRef<THREE.Mesh>(null)
   const mallaRef = useRef<THREE.Mesh>(null)
   const seleccionar = useSelectionStore((s) => s.seleccionar)
+  const enfocar = useSelectionStore((s) => s.enfocar)
   const setHover = useSelectionStore((s) => s.setHover)
 
   const colorHalo: string | null = nodo.llm ? COLOR_PROVEEDOR[nodo.llm.proveedor] : null
@@ -85,6 +86,10 @@ export function AgentNode3D({ nodo, posicion, seleccionado, conHover }: Props) {
       onClick={(e) => {
         e.stopPropagation()
         seleccionar(nodo.id)
+      }}
+      onDoubleClick={(e) => {
+        e.stopPropagation()
+        enfocar(nodo.id)
       }}
     >
       <mesh ref={mallaRef} scale={nodo.tipo === 'cierre' ? 0.75 : 1}>
