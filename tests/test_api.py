@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -193,6 +194,24 @@ def test_home_sirve_la_interfaz(cliente):
     res = client.get("/")
     assert res.status_code == 200
     assert "Sinnema" in res.text
+
+
+def test_home_cascada_web_dist_o_legacy(cliente):
+    """Cascada §8.4: con build de Vite sirve `web/dist`; sin él, el legacy."""
+    client, _ = cliente
+    dist_index = Path(__file__).resolve().parents[1] / "web" / "dist" / "index.html"
+    res = client.get("/")
+    assert res.status_code == 200
+    if dist_index.is_file():
+        assert "Red de agentes 3D" in res.text
+    else:
+        assert "Gestión de proyectos" in res.text
+
+
+def test_assets_inexistente_da_404(cliente):
+    client, _ = cliente
+    res = client.get("/assets/que-no-existe.js")
+    assert res.status_code == 404
 
 
 # --------------------------- Gestión de proyectos ---------------------------

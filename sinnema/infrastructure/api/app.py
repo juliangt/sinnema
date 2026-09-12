@@ -86,6 +86,11 @@ logger = logging.getLogger("sinnema.api")
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
+# UI 3D (spec-red-3d §8.4): build de Vite en `web/dist`, resuelto en cascada
+# con el legacy — sin build JS, el fallback mantiene `sinnema-server`
+# funcional. Solo existe en un checkout del repo (la wheel no la empaqueta).
+WEB_DIST_DIR = Path(__file__).resolve().parents[3] / "web" / "dist"
+
 #: Raíz de datos del servicio (jobs, checkpoints, auditoría, lore, salidas).
 DEFAULT_DATA_DIR = Path(
     os.environ.get("SINNEMA_DATA_DIR", "datos-servidor")
@@ -570,7 +575,20 @@ def create_app(
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> FileResponse:
+        # Cascada §8.4: UI 3D (web/dist) si hay build; si no, legacy static/.
+        dist_index = WEB_DIST_DIR / "index.html"
+        if dist_index.is_file():
+            return FileResponse(dist_index)
         return FileResponse(STATIC_DIR / "index.html")
+
+    @app.get("/assets/{ruta:path}", include_in_schema=False)
+    def assets(ruta: str) -> FileResponse:
+        # Assets del build de Vite (JS/CSS). Con el legacy, esta ruta no existe.
+        destino = (WEB_DIST_DIR / "assets" / ruta).resolve()
+        raiz_assets = (WEB_DIST_DIR / "assets").resolve()
+        if destino.is_file() and destino.is_relative_to(raiz_assets):
+            return FileResponse(destino)
+        raise HTTPException(404, "Asset no encontrado (¿falta `npm run build` en web/?)")
 
     return app
 

@@ -659,7 +659,8 @@ calculado sobre el flujo efectivo del proyecto.
 ```text
 ├── main.py                        # punto de entrada delgado
 ├── proyectos/                     # un <id>.toml por show (datos, no código)
-├── docs/                          # specs: gestión web, agentes dinámicos
+├── docs/                          # specs: gestión web, agentes dinámicos, red 3D
+├── web/                           # UI 3D (React Three Fiber + Vite + TS); build en web/dist
 ├── scripts/
 │   └── ver_grafo.py               # diagrama Mermaid del grafo + stream en vivo
 ├── sinnema/
@@ -767,6 +768,24 @@ cascada: variable de entorno → repo → paquete).
 pip install "sinnema[server]"
 sinnema-server                 # http://127.0.0.1:8000
 ```
+
+#### UI 3D: monitor de la red de agentes (`web/`)
+
+El frontend 3D (`web/`: React Three Fiber + Vite + TypeScript + Tailwind,
+spec `docs/spec-red-3d.md`) se sirve en cascada: si existe el build
+`web/dist`, `GET /` sirve la UI 3D; si no, la web legacy de `static/`.
+
+```bash
+cd web
+npm install
+npm run dev        # desarrollo: :5173 con proxy /api → :8000 (con sinnema-server al lado)
+npm run build      # producción: genera web/dist (no se commitea)
+npm run test       # vitest
+npm run lint       # eslint
+```
+
+Sin build JS el fallback legacy mantiene `sinnema-server` funcional, y la
+wheel no empaqueta `web/`.
 
 La web (servida en `/`) tiene tres pestañas: **Proyectos** (crear, editar,
 duplicar, eliminar, ver prompts compuestos y lore; **editor de flujo** por
