@@ -1,6 +1,8 @@
 # Carpetas y archivos ocultos (que comienzan con punto)
 .*
 !.gitignore
+!.github/
+!.github/**
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
