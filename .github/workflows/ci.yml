@@ -1,10 +1,8 @@
-# CI de Sinnema (spec-red-3d §13/§8c): suite backend y frontend en cada PR.
+# CI de Sinnema (spec-red-3d §13/§8c): suite backend y frontend, solo bajo demanda.
 name: CI
 
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_dispatch:
 
 jobs:
   backend:
