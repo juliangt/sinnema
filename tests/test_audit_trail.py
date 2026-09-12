@@ -223,3 +223,22 @@ def test_cli_crea_carpeta_de_auditoria_y_resumen_por_ejecucion(
 
     assert list((tmp_path / "salidas").glob("*/serie_*.json"))
     assert "Auditoría de la ejecución:" in capsys.readouterr().out
+
+
+# ----------------- Prompts por paso (red-3d §7.4) -----------------
+
+
+def test_log_prompts_queda_emparejado_con_el_paso(tmp_path):
+    pista = FilesystemAuditTrail(tmp_path / "run")
+    pista.log_prompts("plan_series", "SYSTEM:\n...\nUSER:\n...")
+    pista.log_step("plan_series", "El planner generó el plan.")
+
+    prompts = pista._dir / "001_plan_series_prompts.txt"
+    paso = pista._dir / "001_plan_series.txt"
+    assert prompts.is_file() and paso.is_file()
+    assert "USER:" in prompts.read_text(encoding="utf-8")
+
+    # El siguiente paso avanza el contador sin arrastrar el de prompts.
+    pista.log_step("compuerta", "dictamen")
+    assert (pista._dir / "002_compuerta.txt").is_file()
+    assert not (pista._dir / "002_plan_series_prompts.txt").exists()

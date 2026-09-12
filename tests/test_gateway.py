@@ -369,3 +369,35 @@ def test_sin_tools_el_camino_es_el_de_siempre():
     )
     assert isinstance(resultado, SeriesPlan)
     assert eventos == []
+
+
+# ----------------- Auditoría de prompts por paso (red-3d §7.4) -----------------
+
+
+def test_generate_audita_prompts_con_nodo_del_rol():
+    class AuditoriaFalsa:
+        def __init__(self):
+            self.registros = []
+
+        def log_prompts(self, step, contenido):
+            self.registros.append((step, contenido))
+
+    auditoria = AuditoriaFalsa()
+    clientes = dict(clientes_completos())
+    gateway = LangChainStructuredGateway(
+        clientes, RetryPolicy(1, 0.0),
+        prompt_audit=auditoria, nodo_por_rol={"planner": "plan_series"},
+    )
+    plan = gateway.generate("planner", SeriesPlan, "SYS-DE-PRUEBA", "USR-DE-PRUEBA")
+    assert isinstance(plan, SeriesPlan)
+    assert len(auditoria.registros) == 1
+    nodo, contenido = auditoria.registros[0]
+    assert nodo == "plan_series"
+    assert "SYS-DE-PRUEBA" in contenido and "USR-DE-PRUEBA" in contenido
+    assert "Respuesta estructurada (JSON)" in contenido
+
+
+def test_generate_sin_prompt_audit_no_cambia():
+    gateway = LangChainStructuredGateway(clientes_completos(), RetryPolicy(1, 0.0))
+    plan = gateway.generate("planner", SeriesPlan, "sys", "usr")
+    assert isinstance(plan, SeriesPlan)

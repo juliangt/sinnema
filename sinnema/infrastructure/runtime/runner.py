@@ -107,6 +107,11 @@ class SeriesWorker:
     def pending(self) -> int:
         return self._queue.qsize()
 
+    @property
+    def audit_root(self) -> Path:
+        """Raíz de las carpetas de auditoría (la API la usa para /artifacts)."""
+        return self._audit_root
+
     # ------------------------------- ejecución -------------------------------
 
     def _loop(self) -> None:
@@ -168,7 +173,6 @@ class SeriesWorker:
         request.validate()
 
         sink("progress", "Configurando proveedores LLM del proyecto...")
-        gateway = self._gateway_factory(proyecto)
 
         marca = job.job_id
         audit = FilesystemAuditTrail(self._audit_root / job.project_id / f"serie_{marca}")
@@ -226,6 +230,8 @@ class SeriesWorker:
                     kwargs["event_sink"] = sink_generacion
                 if acepta("tools"):
                     kwargs["tools"] = construir_tools_por_rol(proyecto, lore_store)
+                if acepta("prompt_audit"):
+                    kwargs["prompt_audit"] = audit
             except (TypeError, ValueError):
                 pass
             gateway = self._gateway_factory(proyecto, **kwargs)

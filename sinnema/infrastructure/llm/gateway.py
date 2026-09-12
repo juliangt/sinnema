@@ -61,6 +61,8 @@ class LangChainStructuredGateway:
         schemas: Optional[Mapping[str, Type[BaseModel]]] = None,
         event_sink: Optional[EventSink] = None,
         tools_por_rol: Optional[Mapping[str, Sequence[BaseTool]]] = None,
+        prompt_audit: Optional[Any] = None,
+        nodo_por_rol: Optional[Mapping[str, str]] = None,
     ) -> None:
         self._retry_policy = retry_policy or RetryPolicy()
         #: Sink de eventos del job en curso (§7.1); None = sin streaming.
@@ -69,6 +71,10 @@ class LangChainStructuredGateway:
         self._tools_por_rol: Dict[str, Sequence[BaseTool]] = dict(tools_por_rol or {})
         #: Clientes planos (para el loop de tools con bind_tools).
         self._clientes = dict(clients)
+        #: Auditoría de prompts por paso (§7.4): adaptador con ``log_prompts``
+        #: + mapa rol → nombre de nodo para nombrar los archivos.
+        self._prompt_audit = prompt_audit
+        self._nodo_por_rol = dict(nodo_por_rol or {})
         #: Catálogo rol -> contrato. Por defecto, el del registro global; un
         #: proyecto con agentes custom aporta su catálogo extendido.
         self._schemas: Mapping[str, Type[BaseModel]] = (
@@ -144,7 +150,7 @@ class LangChainStructuredGateway:
                     )
                     resultado = None
                 if resultado is not None:
-                    return resultado
+                    return self._terminar(role, schema, mensajes, resultado)
             try:
                 resultado = self._structured[role].invoke(mensajes)
             except Exception as exc:  # noqa: BLE001 - reintentamos cualquier fallo transitorio
@@ -162,11 +168,48 @@ class LangChainStructuredGateway:
                     f"El rol '{role}' devolvió '{type(resultado).__name__}' en lugar "
                     f"de '{schema.__name__}': salida estructurada corrupta."
                 )
-            return resultado
+            return self._terminar(role, schema, mensajes, resultado)
         raise RuntimeError(
             f"El LLM del rol '{role}' falló tras "
             f"{self._retry_policy.max_retries} intentos: {ultimo_error}"
         ) from ultimo_error
+
+    def _terminar(
+        self,
+        role: str,
+        schema: Type[TSchema],
+        mensajes: list,
+        resultado: TSchema,
+    ) -> TSchema:
+        """Audita los prompts del paso (§7.4) y devuelve el resultado."""
+        if self._prompt_audit is not None:
+            nodo = self._nodo_por_rol.get(role)
+            log_prompts = getattr(self._prompt_audit, "log_prompts", None)
+            if nodo is not None and callable(log_prompts):
+                log_prompts(nodo, self._render_prompts(mensajes, resultado))
+        return resultado
+
+    @staticmethod
+    def _render_prompts(mensajes: list, resultado: BaseModel) -> str:
+        """Cuerpo del ``NNN_<nodo>_prompts.txt``: mensajes intercambiados con
+        el modelo (sistema, usuario, tools si hubo) y la respuesta final."""
+        lineas: list = []
+        for mensaje in mensajes:
+            tipo = type(mensaje).__name__
+            lineas.append(f"=== {tipo} ===")
+            lineas.append(str(mensaje.content))
+            llamadas = getattr(mensaje, "tool_calls", None)
+            if llamadas:
+                for llamada in llamadas:
+                    lineas.append(
+                        f">>> tool_call: {llamada.get('name')} "
+                        f"{json.dumps(llamada.get('args'), ensure_ascii=False)}"
+                    )
+        lineas.append("=== Respuesta estructurada (JSON) ===")
+        lineas.append(
+            json.dumps(resultado.model_dump(mode="json"), ensure_ascii=False, indent=2)
+        )
+        return "\n".join(lineas) + "\n"
 
     def _loop_de_tools(
         self,
@@ -276,6 +319,7 @@ def build_gateway(
     retry_policy: Optional[RetryPolicy] = None,
     event_sink: Optional[EventSink] = None,
     tools: Optional[Mapping[str, Sequence[BaseTool]]] = None,
+    prompt_audit: Optional[Any] = None,
 ) -> LangChainStructuredGateway:
     """Composition helper: resuelve clientes por rol y devuelve el gateway.
 
@@ -286,18 +330,23 @@ def build_gateway(
     clave de proveedor. Los agentes custom aportan su contrato genérico al
     catálogo de esquemas del gateway.
 
-    ``event_sink`` (§7.1) conecta el streaming del job una sola vez y
-    ``tools`` (§7.3) habilita el loop de tools por rol; ambos opcionales y
-    ausentes conservan el comportamiento de siempre.
+    ``event_sink`` (§7.1) conecta el streaming del job una sola vez, ``tools``
+    (§7.3) habilita el loop de tools por rol y ``prompt_audit`` (§7.4) escribe
+    los prompts por paso; los tres opcionales y ausentes conservan el
+    comportamiento de siempre.
     """
     schemas: Optional[Mapping[str, Type[BaseModel]]] = None
+    nodo_por_rol: Optional[Mapping[str, str]] = None
     if role_clients is None:
         overrides = project.agentes if project is not None else None
         solo_roles = _roles_con_cliente(project) if project is not None else None
         role_clients = build_role_clients(overrides=overrides, solo_roles=solo_roles)
     if project is not None:
         schemas = _esquemas_del_proyecto(project)
+        definiciones = definiciones_del_proyecto(project)
+        nodo_por_rol = {rol: d.nodo for rol, d in definiciones.items()}
     return LangChainStructuredGateway(
         dict(role_clients), retry_policy, schemas,
         event_sink=event_sink, tools_por_rol=tools,
+        prompt_audit=prompt_audit, nodo_por_rol=nodo_por_rol,
     )

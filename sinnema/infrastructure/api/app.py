@@ -555,6 +555,72 @@ def create_app(
         _job_or_404(job_id)
         return [_evento_dict(ev) for ev in store.events_since(job_id, since)]
 
+    # ----------------------- Auditoría / artefactos -----------------------
+
+    def _audit_dir_del_job(job: Job) -> Path:
+        return getattr(worker, "audit_root", Path("auditoria")) / job.project_id / (
+            f"serie_{job.job_id}"
+        )
+
+    @app.get("/api/jobs/{job_id}/artifacts")
+    def job_artifacts(job_id: str) -> list[dict]:
+        """Pasos de auditoría del job (§5): lista para el timeline del inspector."""
+        job = _job_or_404(job_id)
+        carpeta = _audit_dir_del_job(job)
+        if not carpeta.is_dir():
+            return []
+        pasos = []
+        for archivo in sorted(carpeta.glob("[0-9][0-9][0-9]_*.txt")):
+            if archivo.stem.endswith("_prompts"):
+                continue
+            n, paso, resumen = _parsear_paso(archivo)
+            pasos.append({"n": n, "paso": paso, "resumen": resumen})
+        return pasos
+
+    @app.get("/api/jobs/{job_id}/artifacts/{n}")
+    def job_artifact(job_id: str, n: int) -> dict:
+        """Un paso parseado: resumen, artefacto JSON y prompts (§7.4)."""
+        job = _job_or_404(job_id)
+        carpeta = _audit_dir_del_job(job)
+        destino = next(
+            (a for a in carpeta.glob(f"{n:03d}_*.txt") if not a.stem.endswith("_prompts")),
+            None,
+        )
+        if destino is None:
+            raise HTTPException(404, f"El job '{job_id}' no tiene paso {n:03d}.")
+        n_leido, paso, resumen, artefacto = _parsear_paso(destino, con_artefacto=True)
+        prompts_archivo = next(carpeta.glob(f"{n:03d}_*_prompts.txt"), None)
+        return {
+            "n": n_leido,
+            "paso": paso,
+            "resumen": resumen,
+            "artefacto": artefacto,
+            "prompts": (
+                prompts_archivo.read_text(encoding="utf-8")
+                if prompts_archivo is not None
+                else None
+            ),
+        }
+
+    def _parsear_paso(archivo: Path, con_artefacto: bool = False):
+        lineas = archivo.read_text(encoding="utf-8").splitlines()
+        # Encabezado: "Paso NNN · <paso>"; resumen tras la línea de fecha.
+        titulo = lineas[0] if lineas else ""
+        n = int(titulo.split("·")[0].split()[-1]) if "·" in titulo else 0
+        paso = titulo.split("·", 1)[1].strip() if "·" in titulo else archivo.stem
+        try:
+            resumen = lineas[3]
+        except IndexError:
+            resumen = ""
+        artefacto = None
+        if con_artefacto and "Artefacto generado (JSON):" in lineas:
+            desde = lineas.index("Artefacto generado (JSON):") + 1
+            try:
+                artefacto = json.loads("\n".join(lineas[desde:]).strip() or "null")
+            except json.JSONDecodeError:
+                artefacto = None
+        return (n, paso, resumen, artefacto) if con_artefacto else (n, paso, resumen)
+
     def _evento_dict(ev) -> dict:
         """Forma §4 del RuntimeExecutionEvent: kind/job_id/ts + mensaje
         legacy o payload estructurado fusionado."""

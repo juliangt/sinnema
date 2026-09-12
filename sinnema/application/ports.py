@@ -71,6 +71,14 @@ class AuditTrailPort(Protocol):
         """Registra un fallo que degrada o aborta la ejecución."""
         ...
 
+    def log_prompts(self, step: str, contenido: str) -> None:
+        """Registra los prompts de un paso de agente (spec-red-3d §7.4).
+
+        Es un método opcional del contrato: los adaptadores que no lo
+        implementan simplemente no alimentan el inspector de prompts.
+        """
+        ...
+
 
 class NullAuditTrail:
     """Implementación no-op para cuando no se requiere auditoría."""

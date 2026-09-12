@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from sinnema.infrastructure.api.app import create_app
-from sinnema.infrastructure.projects import ProjectFileStore
+from sinnema.infrastructure.projects import ProjectFileStore, load_project
 from sinnema.infrastructure.runtime.jobs import JobStatus, SqliteJobStore
 from sinnema.infrastructure.runtime.runner import SeriesWorker
 from tests.conftest import gateway_con_serie, make_lore_entry
@@ -805,3 +805,64 @@ def test_spec_desfasado_compara_con_toml_vigente(cliente):
     # Un job terminal no reporta el indicador.
     store.set_status(job.job_id, JobStatus.COMPLETED)
     assert "spec_desfasado" not in client.get(f"/api/jobs/{job.job_id}").json()
+
+
+# --------------------- Artefactos de auditoría (§5/§7.4) ---------------------
+
+
+def test_artifacts_lista_y_detalle_con_prompts(cliente):
+    client, store = cliente
+    res = client.post("/api/series", json={
+        "project_id": "educativo", "topic": "Fotosíntesis", "num_chapters": 2,
+    }, headers={"X-Owner": "ana"})
+    job_id = res.json()["job_id"]
+    esperar(store, job_id)
+
+    pasos = client.get(f"/api/jobs/{job_id}/artifacts").json()
+    assert pasos, "el job completado debe tener pasos de auditoría"
+    nombres = [p["paso"] for p in pasos]
+    assert "solicitud" in nombres and "plan_series" in nombres
+    assert [p["n"] for p in pasos] == sorted(p["n"] for p in pasos)
+
+    # Detalle del paso del planner: artefacto JSON + prompts (con el gateway
+    # real del runner; con gateway falso no hay prompts → al menos no explota).
+    detalle = client.get(f"/api/jobs/{job_id}/artifacts/{pasos[0]['n']}").json()
+    assert detalle["paso"] == pasos[0]["paso"]
+    if detalle["paso"] == "plan_series":
+        assert detalle["artefacto"] is not None
+        assert detalle["artefacto"].get("chapters")
+
+
+def test_artifacts_paso_inexistente_da_404(cliente):
+    client, store = cliente
+    res = client.post("/api/series", json={
+        "project_id": "educativo", "topic": "Fotosíntesis", "num_chapters": 2,
+    }, headers={"X-Owner": "ana"})
+    job_id = res.json()["job_id"]
+    esperar(store, job_id)
+    assert client.get(f"/api/jobs/{job_id}/artifacts/999").status_code == 404
+
+
+def test_prompts_del_paso_llegan_al_detalle(cliente, tmp_path):
+    """El detalle de un paso empareja su NNN_<nodo>_prompts.txt (§7.4). El
+    lado gateway (escritura vía prompt_audit) está cubierto en test_gateway;
+    acá se valida el contrato del endpoint con el archivo presente."""
+    client, store = cliente
+    res = client.post("/api/series", json={
+        "project_id": "educativo", "topic": "Fotosíntesis", "num_chapters": 2,
+    }, headers={"X-Owner": "ana"})
+    job_id = res.json()["job_id"]
+    esperar(store, job_id)
+
+    pasos = client.get(f"/api/jobs/{job_id}/artifacts").json()
+    paso_plan = next(p for p in pasos if p["paso"] == "plan_series")
+
+    carpeta = tmp_path / "auditoria" / "educativo" / f"serie_{job_id}"
+    contenido = "=== SystemMessage ===\n...\n=== Respuesta estructurada (JSON) ===\n{}\n"
+    (carpeta / f"{paso_plan['n']:03d}_plan_series_prompts.txt").write_text(
+        contenido, encoding="utf-8"
+    )
+
+    detalle = client.get(f"/api/jobs/{job_id}/artifacts/{paso_plan['n']}").json()
+    assert detalle["prompts"] == contenido
+    assert detalle["artefacto"] is not None
