@@ -30,6 +30,7 @@ from sinnema.application.use_cases import GenerateSeriesUseCase, build_deliverab
 from sinnema.application.state import PipelineState
 from sinnema.infrastructure.audit import FilesystemAuditTrail
 from sinnema.infrastructure.llm.gateway import build_gateway
+from sinnema.infrastructure.llm.tools import construir_tools_por_rol
 from sinnema.infrastructure.lore import JsonLoreStore
 from sinnema.infrastructure.projects import load_project
 from sinnema.infrastructure.projects.store import fingerprint_spec
@@ -187,26 +188,44 @@ class SeriesWorker:
             rol_a_nodo = {rol: nodo for nodo, rol in nodo_a_rol.items()}
 
             def sink_generacion(rol: str, evento: dict) -> None:
-                if evento.get("tipo") != "token":
-                    return
-                sink(
-                    "token", f"{rol} emite texto",
-                    payload={
-                        "node": rol_a_nodo.get(rol), "rol": rol,
-                        "texto": evento.get("texto", ""),
-                    },
-                )
+                tipo = evento.get("tipo")
+                base = {"node": rol_a_nodo.get(rol), "rol": rol}
+                if tipo == "token":
+                    sink(
+                        "token", f"{rol} emite texto",
+                        payload={**base, "texto": evento.get("texto", "")},
+                    )
+                elif tipo == "tool_start":
+                    sink(
+                        "tool_start", f"{rol} invoca {evento.get('tool')}",
+                        payload={
+                            **base, "tool": evento.get("tool"),
+                            "args": evento.get("args"),
+                        },
+                    )
+                elif tipo == "tool_end":
+                    sink(
+                        "tool_end", f"{rol}: {evento.get('tool')} devolvió",
+                        payload={
+                            **base, "tool": evento.get("tool"),
+                            "resumen": evento.get("resumen", ""),
+                        },
+                    )
 
             # La factory puede ser la build_gateway del sistema (que acepta
-            # event_sink) o una inyectada por tests/CLI con firma (proyecto).
+            # event_sink y tools) o una inyectada por tests/CLI con firma
+            # (proyecto): se le pasan solo los kwargs que declare.
             kwargs: dict = {}
             try:
                 parametros = inspect.signature(self._gateway_factory).parameters
-                if "event_sink" in parametros or any(
+                acepta = lambda nombre: nombre in parametros or any(  # noqa: E731
                     p.kind is inspect.Parameter.VAR_KEYWORD
                     for p in parametros.values()
-                ):
+                )
+                if acepta("event_sink"):
                     kwargs["event_sink"] = sink_generacion
+                if acepta("tools"):
+                    kwargs["tools"] = construir_tools_por_rol(proyecto, lore_store)
             except (TypeError, ValueError):
                 pass
             gateway = self._gateway_factory(proyecto, **kwargs)

@@ -261,3 +261,111 @@ def test_event_sink_del_job_recibe_eventos_con_rol():
     assert isinstance(resultado, SeriesPlan)
     assert [rol for rol, _ in recibidos] == ["planner"]
     assert all(ev["tipo"] == "token" for _, ev in recibidos)
+
+
+# ----------------- Loop de tools integradas (red-3d §7.3) -----------------
+
+
+from langchain_core.messages import AIMessage, ToolMessage  # noqa: E402
+from langchain_core.tools import tool  # noqa: E402
+
+
+@tool
+def suma(a: int, b: int) -> int:
+    """Suma dos enteros de prueba."""
+    return a + b
+
+
+class RunnableConTools:
+    """Runnable 'bound' que responde con AIMessages scriptadas."""
+
+    def __init__(self, respuestas):
+        self._respuestas = list(respuestas)
+        self.invocaciones = 0
+
+    def invoke(self, mensajes):
+        self.invocaciones += 1
+        if self._respuestas:
+            return self._respuestas.pop(0)
+        return AIMessage(content="sin más tools")
+
+
+class FakeChatConTools(FakeChat):
+    """ChatModel que además sabe bind_tools (para el loop §7.3)."""
+
+    def __init__(self, resultado, respuestas_bind):
+        super().__init__(resultado)
+        self._respuestas_bind = respuestas_bind
+        self.ultimo_bound: RunnableConTools | None = None
+
+    def bind_tools(self, tools):
+        self.ultimo_bound = RunnableConTools(self._respuestas_bind)
+        return self.ultimo_bound
+
+
+def gateway_con_tools(respuestas_bind):
+    clientes = dict(clientes_completos())
+    clientes["scriptwriter"] = FakeChatConTools(make_draft(), respuestas_bind)
+    return (
+        LangChainStructuredGateway(
+            clientes, RetryPolicy(1, 0.0), tools_por_rol={"scriptwriter": [suma]},
+        ),
+        clientes,
+    )
+
+
+def _llamada_lore():
+    return {
+        "name": "suma",
+        "args": {"a": 2, "b": 3},
+        "id": "call_1",
+        "type": "tool_call",
+    }
+
+
+def test_loop_de_tools_extiende_la_conversacion_y_emite_eventos():
+    gateway, clientes = gateway_con_tools([
+        AIMessage(content="", tool_calls=[_llamada_lore()]),
+    ])
+    eventos = []
+    from sinnema.domain.models import ScriptDraft
+
+    resultado = gateway.generate(
+        "scriptwriter", ScriptDraft, "sys", "usr", on_event=eventos.append,
+    )
+    assert isinstance(resultado, ScriptDraft)
+    tipos = [e["tipo"] for e in eventos]
+    assert tipos == ["tool_start", "tool_end"]
+    assert eventos[0]["tool"] == "suma" and eventos[0]["args"] == {"a": 2, "b": 3}
+    assert "5" in eventos[1]["resumen"]
+    # La generación estructurada final recibió la conversación extendida.
+    runnable = clientes["scriptwriter"].runnable
+    assert any(isinstance(m, ToolMessage) for m in runnable.ultimo_mensajes)
+
+
+def test_loop_de_tools_guard_de_iteraciones():
+    # El modelo pide tools en bucle: el guard corta a los 5 intentos y la
+    # generación estructurada corre igual.
+    respuestas = [AIMessage(content="", tool_calls=[_llamada_lore()])] * 10
+    gateway, clientes = gateway_con_tools(respuestas)
+    from sinnema.domain.models import ScriptDraft
+
+    eventos = []
+    resultado = gateway.generate(
+        "scriptwriter", ScriptDraft, "sys", "usr", on_event=eventos.append,
+    )
+    assert isinstance(resultado, ScriptDraft)
+    assert clientes["scriptwriter"].ultimo_bound.invocaciones == 5
+
+
+def test_sin_tools_el_camino_es_el_de_siempre():
+    # Rol sin tools: ni bind_tools ni eventos extra.
+    gateway = LangChainStructuredGateway(clientes_completos(), RetryPolicy(1, 0.0))
+    from sinnema.domain.models import SeriesPlan
+
+    eventos = []
+    resultado = gateway.generate(
+        "planner", SeriesPlan, "sys", "usr", on_event=eventos.append,
+    )
+    assert isinstance(resultado, SeriesPlan)
+    assert eventos == []

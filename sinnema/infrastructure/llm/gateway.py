@@ -11,10 +11,11 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Mapping, Optional, Type, TypeVar
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Type, TypeVar
 
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.tools import BaseTool
 from pydantic import BaseModel
 
 from sinnema.application.ports import EventCallback, EventoGeneracion, ROLE_SCHEMAS
@@ -29,6 +30,9 @@ TSchema = TypeVar("TSchema")
 #: Sink de eventos por job (§7.1): ``(rol, evento)`` — el gateway sabe el rol;
 #: el nodo activo lo contextualiza quien construye el sink (el runner).
 EventSink = Callable[[str, EventoGeneracion], None]
+
+#: Guard de costo del loop de tools (§7.3): fuera del recursion_limit del grafo.
+MAX_ITERACIONES_TOOLS = 5
 
 
 @dataclass(frozen=True)
@@ -56,10 +60,15 @@ class LangChainStructuredGateway:
         retry_policy: Optional[RetryPolicy] = None,
         schemas: Optional[Mapping[str, Type[BaseModel]]] = None,
         event_sink: Optional[EventSink] = None,
+        tools_por_rol: Optional[Mapping[str, Sequence[BaseTool]]] = None,
     ) -> None:
         self._retry_policy = retry_policy or RetryPolicy()
         #: Sink de eventos del job en curso (§7.1); None = sin streaming.
         self._event_sink = event_sink
+        #: Tools integradas por rol (§7.3); roles ausentes = camino de siempre.
+        self._tools_por_rol: Dict[str, Sequence[BaseTool]] = dict(tools_por_rol or {})
+        #: Clientes planos (para el loop de tools con bind_tools).
+        self._clientes = dict(clients)
         #: Catálogo rol -> contrato. Por defecto, el del registro global; un
         #: proyecto con agentes custom aporta su catálogo extendido.
         self._schemas: Mapping[str, Type[BaseModel]] = (
@@ -116,6 +125,13 @@ class LangChainStructuredGateway:
             if self._event_sink is not None:
                 self._event_sink(role, evento)
 
+        # Loop de tools integradas (§7.3): corre ANTES de la generación
+        # estructurada, dentro del nodo — no consume supersteps del grafo.
+        # Sin `tools` declaradas para el rol, el camino es exactamente el de
+        # siempre (cero overhead).
+        if role in self._tools_por_rol:
+            mensajes = self._loop_de_tools(role, mensajes, emitir)
+
         ultimo_error: Optional[Exception] = None
         for intento in range(1, self._retry_policy.max_retries + 1):
             if on_event is not None or self._event_sink is not None:
@@ -151,6 +167,49 @@ class LangChainStructuredGateway:
             f"El LLM del rol '{role}' falló tras "
             f"{self._retry_policy.max_retries} intentos: {ultimo_error}"
         ) from ultimo_error
+
+    def _loop_de_tools(
+        self,
+        role: str,
+        mensajes: list,
+        emitir: Callable[[EventoGeneracion], None],
+    ) -> list:
+        """Extiende la conversación con tool calls (§7.3): cliente plano del
+        rol + ``bind_tools`` → mientras pida tools (máx. ``MAX_ITERACIONES_TOOLS``),
+        ejecuta cada una del registro con eventos tool_start/tool_end y adjunta
+        ToolMessages. Devuelve la conversación extendida para la generación
+        estructurada final. Las tools son deterministas y locales: un fallo de
+        tool no tumba el nodo, se devuelve como ToolMessage de error."""
+        tools = {t.name: t for t in self._tools_por_rol[role]}
+        bound = self._clientes[role].bind_tools(list(tools.values()))
+        conversacion = list(mensajes)
+        for _ in range(MAX_ITERACIONES_TOOLS):
+            respuesta = bound.invoke(conversacion)
+            llamadas = getattr(respuesta, "tool_calls", None) or []
+            if not llamadas:
+                break
+            conversacion.append(respuesta)
+            for llamada in llamadas:
+                nombre = llamada.get("name", "")
+                argumentos = llamada.get("args") or {}
+                emitir({"tipo": "tool_start", "tool": nombre, "args": argumentos})
+                try:
+                    resultado = tools[nombre].invoke(argumentos)
+                    resumen = " ".join(str(resultado).split())[:200]
+                except Exception as exc:  # noqa: BLE001 - la tool no tumba el nodo
+                    logger.warning(
+                        "Tool '%s' del rol '%s' falló: %s", nombre, role, exc
+                    )
+                    resultado = f"ERROR ejecutando la tool: {exc}"
+                    resumen = f"error: {exc}"
+                emitir({"tipo": "tool_end", "tool": nombre, "resumen": resumen})
+                conversacion.append(
+                    ToolMessage(
+                        content=str(resultado),
+                        tool_call_id=llamada.get("id") or nombre,
+                    )
+                )
+        return conversacion
 
     def _generar_streaming(
         self,
@@ -216,6 +275,7 @@ def build_gateway(
     role_clients: Optional[Mapping[str, BaseChatModel]] = None,
     retry_policy: Optional[RetryPolicy] = None,
     event_sink: Optional[EventSink] = None,
+    tools: Optional[Mapping[str, Sequence[BaseTool]]] = None,
 ) -> LangChainStructuredGateway:
     """Composition helper: resuelve clientes por rol y devuelve el gateway.
 
@@ -226,8 +286,9 @@ def build_gateway(
     clave de proveedor. Los agentes custom aportan su contrato genérico al
     catálogo de esquemas del gateway.
 
-    ``event_sink`` (§7.1) conecta el streaming del job una sola vez; ausente,
-    el gateway se comporta exactamente como siempre.
+    ``event_sink`` (§7.1) conecta el streaming del job una sola vez y
+    ``tools`` (§7.3) habilita el loop de tools por rol; ambos opcionales y
+    ausentes conservan el comportamiento de siempre.
     """
     schemas: Optional[Mapping[str, Type[BaseModel]]] = None
     if role_clients is None:
@@ -237,5 +298,6 @@ def build_gateway(
     if project is not None:
         schemas = _esquemas_del_proyecto(project)
     return LangChainStructuredGateway(
-        dict(role_clients), retry_policy, schemas, event_sink=event_sink,
+        dict(role_clients), retry_policy, schemas,
+        event_sink=event_sink, tools_por_rol=tools,
     )
