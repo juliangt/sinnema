@@ -32,8 +32,8 @@ server = [
     "uvicorn[standard]>=0.29",
 ]
 media = [
-    "google-genai>=1.0,<2.0",
-    "openai>=1.50,<2.0",
+    "google-genai>=1.0",
+    "openai>=1.50",
 ]
 dev = [
     "pytest>=8.0",
