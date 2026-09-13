@@ -16,6 +16,8 @@ Expone el caso de uso existente como producto distribuible:
 - ``POST /api/projects/{id}/anclas/{a}/imagenes``  upload a la batería,
 - ``GET  /api/projects/{id}/anclas/{a}/imagenes/{f}`` serving de la batería,
 - ``POST /api/projects/{id}/anclas/{a}/lock``      lock con batería mínima,
+- ``GET  /api/jobs/{id}/anclas-candidatas``        candidatos de promoción (§8.1),
+- ``POST /api/projects/{id}/anclas/{a}/promover``  lock humano de candidatos (§8.1),
 - ``GET  /api/meta/roles``           catálogo de agentes para el formulario,
 - ``GET  /``                         la interfaz web (gestión + generación).
 
@@ -66,9 +68,11 @@ from sinnema.application.requests import MAX_CRITIQUE_ATTEMPTS_LIMIT
 from sinnema.application.tools import TOOLS_INTEGRADAS
 from sinnema.application.use_cases import limite_de_recursion
 from sinnema.domain.constants import ALCANCES, SERIES_MAX_CHAPTERS
+from sinnema.domain.services import escena_de_archivo
 from sinnema.domain.models.anclas import (
     BATERIA_MINIMA,
     ESTADOS_DE_ANCLA,
+    ManifestDeGeneracion,
     ROLES_POR_TIPO,
     TIPOS_DE_ANCLA,
     RecursoAncla,
@@ -135,6 +139,23 @@ EXTENSIONES_DE_IMAGEN = {
     ".webp": "image/webp",
 }
 TAMANO_MAXIMO_DE_IMAGEN = 10 * 1024 * 1024  # 10 MB
+
+#: Sugerencia determinista de rol de batería para un candidato de media
+#: (spec-recursos-ancla §8.1, Fase 5): el TIPO del ancla decide el rol más
+#: útil para futuros renders (nueva expresión, ángulo de cobertura, ...).
+ROL_SUGERIDO_POR_TIPO = {
+    "personaje": "expression_sheet",
+    "lugar": "coverage_angle",
+    "objeto": "prop_detail",
+    "estilo": "style_reference",
+}
+
+#: Claves públicas de un candidato (los helpers internos llevan además el
+#: manifest del keyframe, que viaja con la promoción pero no se expone).
+CLAVES_DE_CANDIDATO = (
+    "ancla_id", "chapter_id", "escena", "archivo", "rol_sugerido", "score_qa",
+    "estilo_global",
+)
 
 
 def _siguiente_archivo_de_rol(ancla: RecursoAncla, rol: str, extension: str) -> str:
@@ -329,6 +350,10 @@ def create_app(
     # Biblioteca de recursos ancla bajo el mismo raíz de datos (spec-recursos-
     # ancla §4.2): la lee el CRUD (Fase 1) y el cargador de baterías del media.
     anchor_store = JsonAnchorStore(root=data_dir / "anclas")
+    # Raíz de media ÚNICA (spec-recursos-ancla §6/§8, Fase 5): el worker escribe
+    # los keyframes aquí vía media_factory y la API los lee para promoverlos a
+    # batería — mismo data_dir, misma raíz, sin bifurcaciones de wiring.
+    almacen_media = AlmacenMedia(root=data_dir / "media")
     worker = worker or SeriesWorker(
         store,
         checkpoint_dir=data_dir / "checkpoints",
@@ -343,7 +368,7 @@ def create_app(
         # los conecta el runner (sink del job → SSE).
         media_factory=lambda proyecto: construir_dependencias_de_media(
             proyecto,
-            almacen=AlmacenMedia(root=data_dir / "media"),
+            almacen=almacen_media,
             anchor_store=anchor_store,
         ),
     )
@@ -796,6 +821,190 @@ def create_app(
             )
             ancla = lockeada
         return ancla.model_dump(mode="json")
+
+    # ---------------- Promoción de keyframes a batería (§8.1) ----------------
+
+    def _candidatos_del_entregable(entregable: dict, tipos: Dict[str, str]) -> List[dict]:
+        """Candidatos de promoción (§8.1) contenidos en UN entregable.
+
+        Solo keyframes con QA aprobado — TODOS sus informes con ``aprueba``
+        verdadero; sin informes (QA no corrió) NO es candidato (§8: "keyframes
+        con QA aprobado"). Cada keyframe se ofrece a cada ancla citada en su
+        manifest (``anclas_usadas``) con ``rol_sugerido`` por TIPO del ancla.
+        Al final viaja la entrada especial de ESTILO GLOBAL (§8.3) con el
+        primer keyframe aprobado de la serie (``ancla_id`` nulo). Interno:
+        cada entrada lleva además el manifest del keyframe; la forma pública
+        la recorta ``_candidatos_publicos``.
+        """
+        candidatos: List[dict] = []
+        primer_aprobado: Optional[dict] = None
+        for episodio in entregable.get("episodes", []):
+            for adjunto in episodio.get("adjuntos", []):
+                if adjunto.get("rol") != "media":
+                    continue
+                artefacto = adjunto.get("artefacto", {})
+                for kf in artefacto.get("keyframes", []):
+                    informes = kf.get("qa") or []
+                    if not informes or not all(
+                        bool(informe.get("aprueba")) for informe in informes
+                    ):
+                        continue
+                    archivo = kf.get("archivo", "")
+                    base = {
+                        "chapter_id": artefacto.get("chapter_id", ""),
+                        "escena": escena_de_archivo(archivo),
+                        "archivo": archivo,
+                        "score_qa": min(
+                            float(informe.get("score", 0.0)) for informe in informes
+                        ),
+                        "manifest": kf.get("manifest") or {},
+                    }
+                    if primer_aprobado is None:
+                        primer_aprobado = {
+                            **base,
+                            "ancla_id": None,
+                            "estilo_global": True,
+                            "rol_sugerido": ROL_SUGERIDO_POR_TIPO["estilo"],
+                        }
+                    vistas: set = set()
+                    for uso in (kf.get("manifest") or {}).get("anclas_usadas", []):
+                        ancla_id = uso[0] if uso else None
+                        if not ancla_id or ancla_id in vistas:
+                            continue  # dedup: una misma escena puede citarla dos veces
+                        vistas.add(ancla_id)
+                        candidatos.append({
+                            **base,
+                            "ancla_id": ancla_id,
+                            "rol_sugerido": ROL_SUGERIDO_POR_TIPO.get(tipos.get(ancla_id, "")),
+                        })
+        if primer_aprobado is not None:
+            candidatos.append(primer_aprobado)
+        return candidatos
+
+    def _candidatos_publicos(candidatos: List[dict]) -> List[dict]:
+        return [
+            {clave: candidato[clave] for clave in CLAVES_DE_CANDIDATO
+             if clave in candidato}
+            for candidato in candidatos
+        ]
+
+    def _tipos_de_anclas(project_id: str) -> Dict[str, str]:
+        return {a.ancla_id: a.tipo for a in _biblioteca(project_id)}
+
+    @app.get("/api/jobs/{job_id}/anclas-candidatas")
+    def job_anclas_candidatas(job_id: str) -> List[dict]:
+        """Candidatos de promoción del entregable del job (§8.1, §9.1 Fase 5).
+
+        Keyframes con QA aprobado ofrecidos a las anclas que citan (más la
+        entrada de estilo global §8.3); el lock humano va por
+        ``POST /api/projects/{id}/anclas/{ancla_id}/promover``."""
+        job = _job_or_404(job_id)
+        if job.deliverable is None:
+            raise HTTPException(
+                409, f"El job '{job_id}' aún no tiene entregable "
+                     f"(estado: {job.status.value})."
+            )
+        candidatos = _candidatos_del_entregable(
+            job.deliverable, _tipos_de_anclas(job.project_id)
+        )
+        return _candidatos_publicos(candidatos)
+
+    @app.post(
+        "/api/projects/{project_id}/anclas/{ancla_id}/promover", status_code=201,
+    )
+    def promover_candidato(project_id: str, ancla_id: str, cuerpo: dict) -> dict:
+        """Lock humano de un candidato de media a la batería (§8.1, Fase 5).
+
+        Valida que ``archivo`` sea un candidato vigente de ESE ancla (mismo
+        cálculo que ``GET /api/jobs/{id}/anclas-candidatas``, agregado sobre
+        los jobs completados del proyecto; para un ancla de tipo ``estilo``
+        también vale el candidato de estilo global §8.3), copia el keyframe
+        desde la raíz de media a la carpeta de batería con el nombre
+        ``<rol>_<n>.<ext>`` del correlativo del rol y lo registra con
+        ``origen='generada'`` conservando el manifest de procedencia: lo ya
+        generado conserva su manifest (§8.1) y el almacén sube ``version``
+        si el ancla está lockeada. Idempotencia: promover de nuevo el MISMO
+        keyframe (mismo manifest) responde 409; regeneraciones distintas
+        (manifest distinto) sí pueden sumarse como imágenes nuevas."""
+        _proyecto_o_404(project_id)
+        ancla = _ancla_o_404(project_id, ancla_id)
+        archivo = str(cuerpo.get("archivo") or "").strip()
+        rol = str(cuerpo.get("rol") or "").strip()
+        if not archivo:
+            raise HTTPException(400, "El cuerpo debe traer 'archivo' (ruta relativa de media del candidato).")
+        if rol not in ROLES_POR_TIPO[ancla.tipo]:
+            raise HTTPException(
+                400,
+                f"El rol '{rol or 'vacío'}' no corresponde al tipo "
+                f"'{ancla.tipo}' (válidos: "
+                f"{', '.join(ROLES_POR_TIPO[ancla.tipo])}).",
+            )
+        tipos = _tipos_de_anclas(project_id)
+        candidatos: List[dict] = []
+        for job in store.list_jobs(project_id=project_id):
+            if job.deliverable:
+                candidatos.extend(_candidatos_del_entregable(job.deliverable, tipos))
+        candidato = next(
+            (
+                c for c in candidatos
+                if c["archivo"] == archivo and (
+                    c.get("ancla_id") == ancla_id
+                    or (c.get("estilo_global") and ancla.tipo == "estilo")
+                )
+            ),
+            None,
+        )
+        if candidato is None:
+            raise HTTPException(
+                404,
+                f"El archivo '{archivo}' no es un candidato vigente del ancla "
+                f"'{ancla_id}' (QA aprobado y citado por su manifest; ver "
+                "GET /api/jobs/{id}/anclas-candidatas).",
+            )
+        try:
+            manifest = ManifestDeGeneracion.model_validate(candidato["manifest"])
+        except ValidationError as exc:
+            raise _contrato_invalido(exc) from exc
+        # Idempotencia (§8.1): el manifest identifica la generación (proveedor,
+        # modelo, seed, prompt y momento); mismo manifest = mismo keyframe.
+        if any(
+            imagen.origen == "generada" and imagen.manifest == manifest
+            for imagen in ancla.bateria
+        ):
+            raise HTTPException(
+                409,
+                f"El keyframe '{archivo}' ya fue promovido a la batería de "
+                f"'{ancla_id}' (mismo manifest de generación).",
+            )
+        try:
+            origen = almacen_media.ruta_de(archivo)
+            datos = origen.read_bytes()
+        except FileNotFoundError as exc:
+            raise HTTPException(
+                404, f"El keyframe '{archivo}' ya no existe en la raíz de media."
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        extension = Path(archivo).suffix.lower()
+        nombre = _siguiente_archivo_de_rol(ancla, rol, extension)
+        try:
+            anchor_store.guardar_imagen(project_id, ancla_id, nombre, datos)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        ficha = ancla.model_dump()
+        ficha["bateria"].append({
+            "rol": rol,
+            "archivo": nombre,
+            "origen": "generada",
+            "manifest": candidato["manifest"],
+        })
+        actualizada = RecursoAncla.model_validate(ficha)
+        _guardar(
+            project_id,
+            [actualizada if a.ancla_id == ancla_id else a
+             for a in _biblioteca(project_id)],
+        )
+        return actualizada.model_dump(mode="json")
 
     @app.get("/api/meta/roles")
     def meta_roles() -> list[dict]:
