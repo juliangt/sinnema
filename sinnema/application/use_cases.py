@@ -8,8 +8,10 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 
 from sinnema.application.graph import build_pipeline_graph
 from sinnema.application.ports import (
+    AnchorStorePort,
     AuditTrailPort,
     LoreStorePort,
+    NullAnchorStore,
     NullAuditTrail,
     NullLoreStore,
     StructuredGenerationPort,
@@ -20,7 +22,7 @@ from sinnema.application.settings import PipelineSettings
 from sinnema.application.state import PipelineState
 from sinnema.domain.constants import ALCANCE_DEFAULT
 from sinnema.domain.exceptions import DomainValidationError
-from sinnema.domain.models import SeriesDeliverable
+from sinnema.domain.models import RecursoAncla, SeriesDeliverable
 from sinnema.domain.services import merge_lore
 
 logger = logging.getLogger("sinnema.use_cases")
@@ -92,16 +94,34 @@ class GenerateSeriesUseCase:
         settings: Optional[PipelineSettings] = None,
         audit: Optional[AuditTrailPort] = None,
         lore_store: Optional[LoreStorePort] = None,
+        anchor_store: Optional[AnchorStorePort] = None,
         checkpointer: Optional[BaseCheckpointSaver] = None,
     ) -> None:
         self._project = project
         self._settings = settings or PipelineSettings()
         self._audit = audit or NullAuditTrail()
         self._lore_store: LoreStorePort = lore_store or NullLoreStore()
+        self._anchor_store: AnchorStorePort = anchor_store or NullAnchorStore()
+        # La biblioteca de anclas vive ANTES de la corrida (spec-recursos-ancla
+        # §4.2): se carga una sola vez aquí y se siembra como catálogo fijo.
+        # Solo participan las lockeadas (y nunca retiradas); un proyecto con
+        # ``[visual] anclas = false`` la ignora por completo.
+        self._anclas_lockeadas: List[RecursoAncla] = self._cargar_anclas_lockeadas()
         self._graph = build_pipeline_graph(
             gateway, project, self._settings, audit=self._audit,
             checkpointer=checkpointer,
         )
+
+    def _cargar_anclas_lockeadas(self) -> List[RecursoAncla]:
+        """Biblioteca lockeada del proyecto; vacía si el rol está desactivado."""
+        if not self._project.anclas:
+            return []
+        anclas = self._anchor_store.load(self._project.project_id)
+        return [
+            ancla
+            for ancla in anclas
+            if ancla.estado == "lockeado" and ancla.estado != "retirado"
+        ]
 
     @staticmethod
     def _recursion_limit(request: SeriesRequest) -> int:
@@ -159,7 +179,16 @@ class GenerateSeriesUseCase:
                 f"Continuidad cargada: {len(lore_inicial)} entrada(s) de lore "
                 "persistida(s) del proyecto."
             )
-        estado_inicial = build_initial_state(request, initial_lore=lore_inicial)
+        if self._anclas_lockeadas:
+            self._audit.log_event(
+                f"Biblioteca de anclas cargada: {len(self._anclas_lockeadas)} "
+                "ancla(s) lockeada(s) del proyecto siembran la corrida."
+            )
+        estado_inicial = build_initial_state(
+            request,
+            initial_lore=lore_inicial,
+            initial_anclas=self._anclas_lockeadas,
+        )
         config: Dict[str, Any] = {
             "recursion_limit": self._recursion_limit(request)
         }

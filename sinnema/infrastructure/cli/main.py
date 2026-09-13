@@ -44,6 +44,7 @@ from sinnema.domain.constants import ALCANCES, ALCANCE_DEFAULT, SERIES_MAX_CHAPT
 from sinnema.domain.exceptions import DomainValidationError
 from sinnema.domain.models import SeriesDeliverable
 from sinnema.infrastructure.audit import FilesystemAuditTrail
+from sinnema.infrastructure.anclas import JsonAnchorStore
 from sinnema.infrastructure.llm.gateway import build_gateway
 from sinnema.infrastructure.lore import JsonLoreStore
 from sinnema.infrastructure.projects import list_projects, load_project
@@ -300,7 +301,10 @@ def main() -> int:
         max_critique_attempts=args.max_critique_attempts,
         retry_exhaustion_policy=proyecto.pipeline.politica_al_agotar or "force_accept",
     )
-    use_case = GenerateSeriesUseCase(gateway, proyecto, settings, audit=audit, lore_store=lore_store)
+    use_case = GenerateSeriesUseCase(
+        gateway, proyecto, settings, audit=audit, lore_store=lore_store,
+        anchor_store=JsonAnchorStore(),
+    )
 
     print(
         f"Compilando pipeline del proyecto '{proyecto.project_id}' "

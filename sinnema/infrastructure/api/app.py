@@ -325,6 +325,7 @@ def create_app(
         checkpoint_dir=data_dir / "checkpoints",
         audit_root=data_dir / "auditoria",
         lore_root=data_dir / "continuidad",
+        anchor_root=data_dir / "anclas",
         project_loader=project_store.load,
         spec_reader=project_store.read_raw,
     )
