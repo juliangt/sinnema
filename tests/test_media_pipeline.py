@@ -17,9 +17,14 @@ from sinnema.application.graph import build_pipeline_graph
 from sinnema.application.ports import DependenciasMedia
 from sinnema.application.projects import MediaConfig, project_from_dict, resolver_flujo
 from sinnema.application.requests import build_initial_state
-from sinnema.application.use_cases import GenerateSeriesUseCase, limite_de_recursion
+from sinnema.application.use_cases import (
+    GenerateSeriesUseCase,
+    build_deliverable,
+    limite_de_recursion,
+)
 from sinnema.domain.models import MediaCrudo, ManifestDeGeneracion, ReferenciaAncla
 from sinnema.domain.services import componer_pedido_escena, pares_identidad_primero
+from sinnema.infrastructure.anclas import JsonAnchorStore
 from sinnema.infrastructure.media import AlmacenMedia
 from sinnema.infrastructure.runtime.jobs import SqliteJobStore
 from sinnema.infrastructure.runtime.runner import SeriesWorker
@@ -506,3 +511,68 @@ def test_worker_sin_media_factory_corre_sin_el_nodo(tmp_path):
     assert "media_start" not in tipos
     episodio = store.get_job(job.job_id).deliverable["episodes"][0]
     assert all(a["rol"] != "media" for a in episodio["adjuntos"])
+
+
+# ===================== entregable 1.2 (Fase 5, spec §10) =====================
+
+
+def _gateway_con_spec_anclada() -> FakeGateway:
+    """Gateway de serie cuyo paquete técnico cita 'protagonista' en la escena 1."""
+    gw = gateway_con_serie(num_chapters=1)
+    draft = make_draft("ch-01")
+    paquete = make_package(draft)
+    specs = list(paquete.visual_specs)
+    specs[0] = specs[0].model_copy(
+        update={"anclas": [ReferenciaAncla(ancla_id="protagonista")]}
+    )
+    gw._guiones["technical_director"] = [paquete.model_copy(update={"visual_specs": specs})]
+    return gw
+
+
+def _almacen_con_lockeada(tmp_path) -> JsonAnchorStore:
+    store = JsonAnchorStore(root=tmp_path / "anclas")
+    store.save(PROJECT_ID, [make_ancla("protagonista", estado="lockeado")])
+    return store
+
+
+def test_entregable_12_las_escenas_llevan_anclas_y_keyframe(tmp_path):
+    """Fase 5 (§10): al consolidar, cada FinalScene recibe las anclas citadas
+    por su spec visual y el keyframe del adjunto media (por scene_number)."""
+    puerto = PuertoMediaFalso()
+    use_case = GenerateSeriesUseCase(
+        _gateway_con_spec_anclada(),
+        _proyecto_media(),
+        anchor_store=_almacen_con_lockeada(tmp_path),
+        media=_deps(puerto, tmp_path),
+    )
+    final = _correr(use_case, make_request(num_chapters=1, project=_proyecto_media()))
+
+    entregable = build_deliverable(final)
+    assert entregable.schema_version == "1.2"
+    episodio = entregable.episodes[0]
+    primera = episodio.scenes[0]
+    assert primera.anclas == [ReferenciaAncla(ancla_id="protagonista")]
+    assert primera.keyframe is not None
+    assert primera.keyframe.archivo == f"{PROJECT_ID}/ch-01/escena_1.png"
+    assert primera.keyframe.manifest.anclas_usadas[0][0] == "protagonista"
+    # Escena sin anclas citadas: keyframe igualmente presente (el media cubre
+    # todas las escenas del paquete).
+    segunda = episodio.scenes[1]
+    assert segunda.anclas == []
+    assert segunda.keyframe is not None
+    assert segunda.keyframe.archivo == f"{PROJECT_ID}/ch-01/escena_2.png"
+    # Y el adjunto media sigue viajando con el episodio (sin duplicación).
+    assert any(a.rol == "media" for a in episodio.adjuntos)
+
+
+def test_entregable_12_sin_media_ni_anclas_los_campos_quedan_en_default(tmp_path):
+    """Paridad 1.2 (§10): sin capa de media y sin anclas, las escenas llevan
+    ``anclas == []`` y ``keyframe is None`` — solo sube ``schema_version``."""
+    use_case = GenerateSeriesUseCase(gateway_con_serie(1), make_project())
+    final = _correr(use_case, make_request(num_chapters=1))
+
+    entregable = build_deliverable(final)
+    assert entregable.schema_version == "1.2"
+    for escena in entregable.episodes[0].scenes:
+        assert escena.anclas == []
+        assert escena.keyframe is None

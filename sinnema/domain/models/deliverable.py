@@ -17,8 +17,10 @@ from sinnema.domain.constants import (
     TOTAL_DURATION_UNIVERSAL_MIN_SECONDS,
 )
 from sinnema.domain.models.audit import QualityAudit
+from sinnema.domain.models.anclas import ReferenciaAncla
 from sinnema.domain.models.content import Transition
 from sinnema.domain.models.continuity import LoreEntry
+from sinnema.domain.models.media import MediaGenerado
 from sinnema.domain.models.technical import TechnicalPackage
 
 #: Tolerancia al comparar el promedio declarado con el recalculado (redondeo a 2 decimales).
@@ -49,6 +51,24 @@ class FinalScene(BaseModel):
     )
     motion_direction: str = Field(
         default="", description="Vacío = escena sin spec visual (director técnico desactivado)."
+    )
+    #: Entregable 1.2 (spec-recursos-ancla §10): anclas citadas por la spec
+    #: visual de la escena y keyframe generado por la capa de media. Ambos
+    #: campos nacen con default: sin anclas ni ``[media]`` el entregable no
+    #: cambia estructuralmente (solo sube ``schema_version``).
+    anclas: List[ReferenciaAncla] = Field(
+        default_factory=list,
+        description=(
+            "Anclas citadas por la spec visual de esta escena (§5.3); "
+            "vacío = escena sin anclados o sin director técnico."
+        ),
+    )
+    keyframe: Optional[MediaGenerado] = Field(
+        default=None,
+        description=(
+            "Keyframe de la escena (archivo + manifest de procedencia + QA, "
+            "§6/§7); None = escena sin media (capa desactivada o fallo)."
+        ),
     )
 
 
@@ -137,7 +157,7 @@ class FailedChapterRecord(BaseModel):
 class SeriesDeliverable(BaseModel):
     """Contrato final de salida para APIs, motores de render o persistencia."""
 
-    schema_version: Literal["1.1"] = "1.1"
+    schema_version: Literal["1.2"] = "1.2"
     project_id: str = Field(
         ...,
         min_length=1,

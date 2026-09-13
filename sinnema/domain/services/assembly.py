@@ -17,10 +17,12 @@ from sinnema.domain.models import (
     ChapterOutline,
     FailedChapterRecord,
     FinalScene,
+    MediaDelEpisodio,
     QualityAudit,
     ScriptDraft,
     TechnicalPackage,
 )
+from sinnema.domain.services.media import escena_de_archivo
 
 
 def identity_adaptation(draft: ScriptDraft) -> AdaptedScript:
@@ -104,6 +106,7 @@ def assemble_episode(
     package: Optional[TechnicalPackage],
     audit: Optional[QualityAudit],
     adjuntos: Sequence[ArtefactoAdjunto] = (),
+    media: Optional[MediaDelEpisodio] = None,
 ) -> ApprovedEpisode:
     """Consolida borrador + adaptación + specs técnicas en un episodio aprobado.
 
@@ -113,6 +116,11 @@ def assemble_episode(
     episodio no lleva specs visuales; sin auditoría, sin dictamen de calidad.
     ``adjuntos`` son los artefactos integrables (enriquecedores, dictamen,
     specs) que viajan con el episodio serializados en JSON.
+
+    ``media`` (spec-recursos-ancla §10, entregable 1.2) es el adjunto de media
+    del capítulo: presente, cada ``FinalScene`` recibe su ``keyframe`` (por
+    scene_number, derivado del nombre de archivo) y las anclas citadas por su
+    spec; ausente, ambas quedan con default (paridad 1.1).
     """
     _mismo_chapter_id(chapter.chapter_id, "borrador", draft.chapter_id)
     if adapted is None:
@@ -124,6 +132,12 @@ def assemble_episode(
     escenas_base = {s.scene_number: s for s in draft.scenes}
     escenas_adaptadas = {s.scene_number: s for s in adapted.adapted_scenes}
     specs = {s.scene_number: s for s in package.visual_specs} if package else {}
+    keyframes = {}
+    if media is not None:
+        for kf in media.keyframes:
+            numero = escena_de_archivo(kf.archivo)
+            if numero is not None and numero not in keyframes:
+                keyframes[numero] = kf
 
     escenas_finales = []
     for numero in sorted(escenas_base):
@@ -145,6 +159,8 @@ def assemble_episode(
                 image_prompt=spec.image_prompt if spec else "",
                 negative_prompt=spec.negative_prompt if spec else "",
                 motion_direction=spec.motion_direction if spec else "",
+                anclas=list(spec.anclas) if spec else [],
+                keyframe=keyframes.get(numero),
             )
         )
 

@@ -25,6 +25,7 @@ from sinnema.domain.services.lore import extract_new_lore, merge_lore
 from sinnema.domain.services.media import (
     componer_pedido_escena,
     componer_prompt_final,
+    escena_de_archivo,
     pares_identidad_primero,
 )
 
@@ -35,6 +36,7 @@ __all__ = [
     "cobertura_casting",
     "componer_pedido_escena",
     "componer_prompt_final",
+    "escena_de_archivo",
     "extract_new_lore",
     "identity_adaptation",
     "merge_lore",

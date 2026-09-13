@@ -8,6 +8,7 @@ del proveedor). Funciones PURAS: sin I/O, sin reloj — testables sin mocks.
 """
 from __future__ import annotations
 
+import re
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from sinnema.domain.models import (
@@ -20,6 +21,22 @@ from sinnema.domain.models import (
 
 #: Orden de grupos §3.1: el ancla de IDENTIDAD (personaje) siempre primera.
 _ORDEN_DE_GRUPO: Dict[str, int] = {"personaje": 0, "lugar": 1, "objeto": 2, "estilo": 3}
+
+#: Naming de keyframe que garantiza ``AlmacenMedia``: ``escena_<n>.<ext>``.
+_NOMBRE_KEYFRAME = re.compile(r"^escena_(\d+)\.[A-Za-z0-9]+$")
+
+
+def escena_de_archivo(archivo: str) -> Optional[int]:
+    """Número de escena implícito en la ruta relativa de un keyframe.
+
+    ``MediaGenerado`` no lleva ``scene_number``: la escena viaja en el nombre
+    del archivo (``<project>/<chapter>/escena_<n>.<ext>``, contrato del
+    almacén de media). Devuelve ``None`` si la ruta no tiene la forma
+    esperada (nunca debe pasar para media del pipeline).
+    """
+    nombre = archivo.rsplit("/", 1)[-1]
+    coincide = _NOMBRE_KEYFRAME.match(nombre)
+    return int(coincide.group(1)) if coincide else None
 
 
 def pares_identidad_primero(

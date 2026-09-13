@@ -207,7 +207,7 @@ def test_corrida_cli_con_hasta_guion_entrega_borradores_sin_specs(
     assert "Alcance de la corrida: guion" in salida
     datos = json.loads((tmp_path / "salidas" / "serie.json").read_text())
     assert datos["alcance"] == "guion"
-    assert datos["schema_version"] == "1.1"
+    assert datos["schema_version"] == "1.2"
     assert len(datos["episodes"]) == 1
     assert datos["episodes"][0]["technical"] is None
     assert datos["episodes"][0]["audit"] is None

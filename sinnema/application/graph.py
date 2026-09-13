@@ -54,7 +54,7 @@ from sinnema.application.ports import (
     NullAuditTrail,
     StructuredGenerationPort,
 )
-from sinnema.application.nodos_media import make_render_keyframes_node
+from sinnema.application.nodos_media import ROL_ADJUNTO_MEDIA, make_render_keyframes_node
 from sinnema.application.projects import ProjectSpec, resolver_flujo
 from sinnema.application.registry import (
     AGENT_REGISTRY,
@@ -321,6 +321,10 @@ def build_pipeline_graph(
         _, capitulo, indice = capitulo_actual(state)
         paquete = state.get("technical_package")
         dictamen = state.get("qa_verdict")
+        # Entregable 1.2 (spec-recursos-ancla §10): el adjunto ``media`` de la
+        # pizarra alimenta FinalScene.keyframe por escena; sin media (capa
+        # desactivada o nodo ausente) las escenas quedan con default (paridad).
+        media_adjunto = (state.get("artefactos") or {}).get(ROL_ADJUNTO_MEDIA)
         episodio = assemble_episode(
             chapter=capitulo,
             order_index=indice + 1,
@@ -329,6 +333,7 @@ def build_pipeline_graph(
             package=paquete,
             audit=dictamen,
             adjuntos=_adjuntos_del_estado(state, paquete=paquete, dictamen=dictamen),
+            media=media_adjunto,
         )
         lore_nuevo = extract_new_lore(
             capitulo,
