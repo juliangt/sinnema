@@ -108,6 +108,12 @@ def make_render_keyframes_node(
         encadenar = project.media.encadenar_frames
         intentos_max = 1 + max(0, project.media.intentos_qa)
 
+        # `ancla_estilo` de [visual] (§4.3): la política del TOML aplica el
+        # style_reference de esa ancla a TODO render, aunque el director no la
+        # haya declarado. Configurada pero no lockeada: aviso en auditoría y
+        # la escena sigue sin ella (la política nunca inventa referencias).
+        ancla_estilo = _resolver_ancla_estilo(project, catalogo, audit)
+
         def emitir(evento: Dict[str, Any]) -> None:
             if eventos is not None:
                 eventos(evento)
@@ -118,13 +124,26 @@ def make_render_keyframes_node(
         previos: List[Tuple[int, bytes]] = []
         ultimo_frame: Optional[bytes] = None
         for spec in paquete.visual_specs:
+            especificacion = spec
+            if ancla_estilo is not None and not any(
+                referencia.ancla_id == ancla_estilo.ancla_id
+                for referencia in spec.anclas
+            ):
+                especificacion = spec.model_copy(update={
+                    "anclas": [
+                        *spec.anclas,
+                        ReferenciaAncla(
+                            ancla_id=ancla_estilo.ancla_id, roles=["style_reference"]
+                        ),
+                    ]
+                })
             pedido_base = componer_pedido_escena(
                 paquete,
-                spec,
+                especificacion,
                 catalogo,
                 frame_inicial=ultimo_frame if encadenar else None,
             )
-            pares = pares_identidad_primero(spec.anclas, catalogo)
+            pares = pares_identidad_primero(especificacion.anclas, catalogo)
             emitir({
                 "tipo": "media_start",
                 "escena": spec.scene_number,
@@ -257,6 +276,31 @@ def make_render_keyframes_node(
         }
 
     return _render_keyframes
+
+
+def _resolver_ancla_estilo(
+    project: ProjectSpec,
+    catalogo: List[RecursoAncla],
+    audit: AuditTrailPort,
+) -> Optional[RecursoAncla]:
+    """Resuelve ``[visual].ancla_estilo`` contra el catálogo lockeado (§4.3).
+
+    Devuelve la ancla si está configurada, existe y está lockeada; en otro
+    caso avisa en auditoría (configuración mal apuntada) y devuelve ``None``.
+    """
+    ancla_id = project.ancla_estilo
+    if not ancla_id:
+        return None
+    por_id = {ancla.ancla_id: ancla for ancla in catalogo}
+    ancla = por_id.get(ancla_id)
+    if ancla is None:
+        audit.log_event(
+            f"[visual].ancla_estilo='{ancla_id}' no está en el catálogo "
+            "lockeado (o el proyecto tiene anclas desactivadas): las escenas "
+            "se generan sin estilo global."
+        )
+        return None
+    return ancla
 
 
 def _resumen_de_informes(informes: Sequence[InformeQaVisual]) -> str:

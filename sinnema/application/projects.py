@@ -560,6 +560,10 @@ class ProjectSpec:
     #: ``[visual]``, spec-recursos-ancla §4.3): ``false`` la ignora por
     #: completo; default ``true`` (participación automática si hay lockeadas).
     anclas: bool = True
+    #: ``ancla_estilo`` de ``[visual]`` (§4.3): ancla de estilo aplicada a TODO
+    #: render — su ``style_reference`` entra en el pedido de cada escena aunque
+    #: el director no la haya declarado. ``None`` = sin ancla de estilo global.
+    ancla_estilo: Optional[str] = None
     #: Política de la capa de media (sección opcional ``[media]``, §4.3/§6):
     #: sin sección, todo default-off y la corrida es la de siempre.
     media: MediaConfig = field(default_factory=MediaConfig)
@@ -902,6 +906,26 @@ def _anclas_habilitadas(datos: Dict[str, Any], problemas: List[str]) -> bool:
     return valor
 
 
+def _ancla_estilo(datos: Dict[str, Any], problemas: List[str]) -> Optional[str]:
+    """Parsea la clave opcional ``ancla_estilo`` de ``[visual]`` (§4.3).
+
+    Ancla de estilo aplicada a TODO render: su ``style_reference`` entra en el
+    pedido de cada escena (la inyección la hace el nodo de media si el ancla
+    existe y está lockeada). ``None`` = sin ancla de estilo global.
+    """
+    visual = datos.get("visual")
+    if not isinstance(visual, dict) or "ancla_estilo" not in visual:
+        return None
+    valor = visual["ancla_estilo"]
+    if not isinstance(valor, str) or not valor.strip():
+        problemas.append(
+            "'ancla_estilo' en [visual] debe ser el ancla_id de un ancla de "
+            f"tipo 'estilo' (recibido: '{valor}')."
+        )
+        return None
+    return valor.strip()
+
+
 def _mapear_pipeline(datos: Dict[str, Any], problemas: List[str]) -> PipelineConfig:
     """Parsea la sección opcional ``[pipeline]``."""
     crudo = datos.get("pipeline")
@@ -1098,6 +1122,7 @@ def project_from_dict(datos: Dict[str, Any]) -> ProjectSpec:
     pipeline = _mapear_pipeline(datos, problemas)
     flujo = _mapear_flujo(datos, problemas)
     anclas = _anclas_habilitadas(datos, problemas)
+    ancla_estilo = _ancla_estilo(datos, problemas)
     media = _mapear_media(datos, problemas)
     if flujo is not None:
         # Semántica del flujo junto al resto de los problemas (§9: todos se
@@ -1117,6 +1142,7 @@ def project_from_dict(datos: Dict[str, Any]) -> ProjectSpec:
         pipeline=pipeline,
         flujo=flujo,
         anclas=anclas,
+        ancla_estilo=ancla_estilo,
         media=media,
     )
     spec.validate()

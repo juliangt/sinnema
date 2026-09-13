@@ -576,3 +576,79 @@ def test_entregable_12_sin_media_ni_anclas_los_campos_quedan_en_default(tmp_path
     for escena in entregable.episodes[0].scenes:
         assert escena.anclas == []
         assert escena.keyframe is None
+
+
+# ==================== [visual].ancla_estilo (§4.3) ====================
+
+
+_DATOS_BASE = {
+    "proyecto": {
+        "id": "prueba", "marca": "Prueba", "concepto": "Un concepto suficientemente largo",
+        "tema_por_defecto": "Un tema por defecto suficientemente largo",
+        "idioma": "Español neutro",
+    },
+    "voz": {"audiencia": "Público de prueba", "contexto_cultural": "Contexto de prueba",
+            "tono": "Tono de prueba", "guia_de_estilo": "Guía corta", "restricciones": "Ninguna"},
+    "visual": {"estilo_maestro": "3D isometric render style for testing purposes"},
+}
+
+
+def test_ancla_estilo_se_parsea_del_toml():
+    assert project_from_dict(_DATOS_BASE).ancla_estilo is None
+    con_estilo = project_from_dict({
+        **_DATOS_BASE,
+        "visual": {**_DATOS_BASE["visual"], "ancla_estilo": "look-principal"},
+    })
+    assert con_estilo.ancla_estilo == "look-principal"
+    with pytest.raises(ValueError, match="ancla_estilo"):
+        project_from_dict({
+            **_DATOS_BASE,
+            "visual": {**_DATOS_BASE["visual"], "ancla_estilo": 42},
+        })
+
+
+def test_ancla_estilo_entra_en_todos_los_pedidos(tmp_path):
+    """§4.3: con ``[visual].ancla_estilo``, el style_reference de esa ancla
+    lockeada entra en el pedido de TODAS las escenas (la política del TOML)."""
+    from sinnema.infrastructure.anclas import JsonAnchorStore
+    from conftest import make_ancla
+
+    store = JsonAnchorStore(root=tmp_path / "anclas")
+    store.save(PROJECT_ID, [make_ancla("look-principal", tipo="estilo", estado="lockeado")])
+    proyecto = _proyecto_media()
+    proyecto = type(proyecto)(
+        **{**proyecto.__dict__, "anclas": True, "ancla_estilo": "look-principal"}
+    )
+    puerto = PuertoMediaFalso()
+    use_case = GenerateSeriesUseCase(
+        gateway_con_serie(1), proyecto,
+        anchor_store=store, media=_deps(puerto, tmp_path),
+    )
+    _correr(use_case, make_request(num_chapters=1, project=proyecto))
+
+    assert len(puerto.pedidos) == 6
+    for pedido in puerto.pedidos:
+        estilos = [r for r in pedido.anclas if r.ancla_id == "look-principal"]
+        assert estilos and estilos[0].roles == ["style_reference"]
+
+
+def test_ancla_estilo_mal_apuntada_avisa_y_no_inyecta(tmp_path):
+    from sinnema.infrastructure.anclas import JsonAnchorStore
+    from conftest import make_ancla
+
+    store = JsonAnchorStore(root=tmp_path / "anclas")
+    store.save(PROJECT_ID, [make_ancla("look-principal", tipo="estilo", estado="lockeado")])
+    audit = AuditRegistrada()
+    proyecto = _proyecto_media()
+    proyecto = type(proyecto)(
+        **{**proyecto.__dict__, "anclas": True, "ancla_estilo": "no-existe"}
+    )
+    puerto = PuertoMediaFalso()
+    use_case = GenerateSeriesUseCase(
+        gateway_con_serie(1), proyecto, audit=audit,
+        anchor_store=store, media=_deps(puerto, tmp_path),
+    )
+    _correr(use_case, make_request(num_chapters=1, project=proyecto))
+
+    assert all(pedido.anclas == [] for pedido in puerto.pedidos)
+    assert any("ancla_estilo='no-existe'" in e for e in audit.eventos)

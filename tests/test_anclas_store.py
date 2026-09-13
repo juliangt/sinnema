@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import logging
 from pathlib import Path
 
 import pytest
@@ -135,19 +134,47 @@ def test_guardar_sobre_biblioteca_corrupta_aborta(tmp_path):
         store.save("sinnema", [make_ancla("prota", estado="lockeado")])
 
 
-def test_fallo_de_disco_al_guardar_no_tumba(tmp_path, caplog, monkeypatch):
-    """Espejo del lore: un OSError al persistir deja warning y sigue (el error
-    accionable para la persona detrás de la acción lo levanta la capa API)."""
+def test_fallo_de_disco_al_guardar_es_accionable(tmp_path, monkeypatch):
+    """§4.2: la escritura nace de acciones humanas de la UI/API — un OSError
+    al persistir sube como RuntimeError accionable (no best-effort como el
+    lore: la biblioteca de anclas no se pierde en silencio)."""
     store = JsonAnchorStore(tmp_path)
 
     def _disco_lleno(*_a, **_k):
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(Path, "write_text", _disco_lleno)
-    with caplog.at_level(logging.WARNING, logger="sinnema.anclas"):
+    with pytest.raises(RuntimeError, match="No space left"):
         store.save("sinnema", [make_ancla("prota")])
 
-    assert "No se pudo persistir la biblioteca" in caplog.text
+
+def test_api_traduce_fallo_de_disco_a_500_accionable(tmp_path, monkeypatch):
+    """La capa API surfacea el RuntimeError del almacén como 500 accionable
+    (nunca un 200/201 sin haber persistido)."""
+    from fastapi.testclient import TestClient
+
+    from sinnema.infrastructure.api.app import create_app
+
+    app = create_app(data_dir=tmp_path)
+    client = TestClient(app)
+    cuerpo = {
+        "ancla_id": "prota",
+        "tipo": "personaje",
+        "nombre": "Prota",
+        "descripcion_canonica": "A test character with a canonical english description",
+    }
+    assert client.post("/api/projects/comida/anclas", json=cuerpo).status_code == 201
+
+    def _disco_lleno(*_a, **_k):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(Path, "write_text", _disco_lleno)
+    res = client.put(
+        "/api/projects/comida/anclas/prota",
+        json={"nombre": "Prota renombrada"},
+    )
+    assert res.status_code == 500
+    assert "No space left" in res.json()["detail"]
 
 
 # --------------------- Localización de media (Fase 1) ---------------------

@@ -628,6 +628,22 @@ def create_app(
             raise HTTPException(
                 409 if "duplicado" in str(exc) else 400, str(exc)
             ) from exc
+        except RuntimeError as exc:
+            # §4.2: la biblioteca se escribe desde acciones humanas — un fallo
+            # de disco es accionable (500 con el mensaje del almacén), nunca
+            # un 200 sin haber persistido.
+            raise HTTPException(500, str(exc)) from exc
+
+    def _guardar_imagen(project_id: str, ancla_id: str, nombre: str, datos: bytes) -> None:
+        try:
+            anchor_store.guardar_imagen(project_id, ancla_id, nombre, datos)
+        except OSError as exc:
+            raise HTTPException(
+                500,
+                f"No se pudo escribir la imagen de la batería "
+                f"({ancla_id}/{nombre}): {exc}. Revisá el disco y volvé a "
+                "intentar el upload.",
+            ) from exc
 
     def _qa_medio_por_ancla(project_id: str) -> Dict[str, Tuple[float, int]]:
         """QA medio por ancla sobre el media ENTREGADO de los jobs completados
@@ -805,7 +821,7 @@ def create_app(
             )
         nombre = _siguiente_archivo_de_rol(ancla, rol, extension)
         try:
-            anchor_store.guardar_imagen(project_id, ancla_id, nombre, datos)
+            _guardar_imagen(project_id, ancla_id, nombre, datos)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         ficha = ancla.model_dump()
@@ -1070,7 +1086,7 @@ def create_app(
         extension = Path(archivo).suffix.lower()
         nombre = _siguiente_archivo_de_rol(ancla, rol, extension)
         try:
-            anchor_store.guardar_imagen(project_id, ancla_id, nombre, datos)
+            _guardar_imagen(project_id, ancla_id, nombre, datos)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         ficha = ancla.model_dump()

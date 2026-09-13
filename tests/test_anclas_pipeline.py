@@ -750,3 +750,39 @@ def test_lore_enlazado_por_cruce_con_anclas_lockeadas(tmp_path):
     assert enlazadas[0].term == "Protagonista"
     assert enlazadas[0].ancla_id == "protagonista"
     assert enlazadas[0].category == "personaje"
+
+
+def test_fallo_de_disco_en_save_anclas_no_tumba_la_corrida(tmp_path):
+    """§4.2: la escritura del almacén es accionable en la capa humana, pero la
+    persistencia de fin de CORRIDA degrada con aviso (como el lore): la corrida
+    completa y el fallo queda en auditoría."""
+    from pathlib import Path as _Path
+
+    store = _almacen_con_lockeadas(tmp_path)
+    audit = AuditRegistrada()
+    use_case = GenerateSeriesUseCase(
+        gateway_con_serie(num_chapters=2),
+        make_project(),
+        audit=audit,
+        anchor_store=store,
+    )
+
+    def _disco_lleno(*_a, **_k):
+        raise RuntimeError("No se pudo persistir la biblioteca (disco lleno)")
+
+    original_save = store.save
+    store.save = _disco_lleno  # type: ignore[method-assign]
+    try:
+        final = _correr(use_case, make_request(num_chapters=2))
+        # La corrida completa aunque la persistencia falle (gateway de prueba
+        # sin anclas citadas: además no hay escritura que intentarlo).
+        assert len(final["completed_episodes"]) == 2
+        # La degradación §4.2: el fallo queda en voz alta en auditoría.
+        use_case._persistir_biblioteca(
+            [make_ancla("protagonista", estado="lockeado")],
+            "la vigencia de anclas del episodio",
+        )
+    finally:
+        store.save = original_save  # type: ignore[method-assign]
+
+    assert any("No se pudo persistir" in e for e in audit.eventos)

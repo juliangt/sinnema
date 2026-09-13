@@ -3,12 +3,13 @@
 Cada proyecto persiste su biblioteca en ``<raíz>/<project_id>/anclas.json`` y
 los archivos de media de cada batería en ``<raíz>/<project_id>/<ancla_id>/``.
 
-Semántica de fallo espejo exacto del lore (``JsonLoreStore``): la lectura de
-un archivo corrupto falla en voz alta (la biblioteca es valiosa: mejor abortar
-que perderla en silencio) y la escritura con fallo de disco es best-effort
-(log de warning, nunca tumba). La spec-recursos-ancla §4.2 añade que la
-escritura nace de acciones humanas de la UI/API, así que el error accionable
-para esa persona lo levanta la capa API (Fase 1) sobre este mismo contrato.
+Semántica de fallo (spec-recursos-ancla §4.2): la lectura de un archivo
+corrupto falla en voz alta y la ESCRITURA también — a diferencia del lore,
+cuya escritura es best-effort porque nace de la corrida, la biblioteca de
+anclas se escribe desde acciones humanas de la UI/API (y la persistencia de
+vigencia de fin de corrida, que degrada con aviso en ``GenerateSeriesUseCase``):
+un fallo de disco es un error accionable, nunca una pérdida silenciosa de la
+biblioteca.
 
 Al guardar se verifican las unicidades del proyecto (``ancla_id`` y ``nombre``
 case-insensitive) y se aplica la regla de versionado §4.1: cambiar la batería
@@ -102,12 +103,12 @@ class JsonAnchorStore:
                 encoding="utf-8",
             )
         except OSError as exc:
-            logger.warning(
-                "No se pudo persistir la biblioteca de anclas del proyecto "
-                "'%s' (%s): %s. La biblioteca en memoria queda sin guardar; "
-                "revisá el disco antes de seguir editando desde la UI.",
-                project_id, ruta, exc,
-            )
+            raise RuntimeError(
+                f"No se pudo persistir la biblioteca de anclas del proyecto "
+                f"'{project_id}' ({ruta}): {exc}. La biblioteca en memoria "
+                "queda sin guardar: revisá el disco y volvé a intentar la "
+                "operación antes de seguir editando."
+            ) from exc
 
     @staticmethod
     def _rechazar_duplicados(anclas: List[RecursoAncla]) -> None:

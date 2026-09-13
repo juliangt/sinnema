@@ -274,7 +274,21 @@ class GenerateSeriesUseCase:
             else:
                 fusion.append(ancla)
         if cambio:
-            self._anchor_store.save(self._project.project_id, fusion)
+            self._persistir_biblioteca(fusion, "la vigencia de anclas del episodio")
+
+    def _persistir_biblioteca(self, anclas: List[RecursoAncla], que: str) -> None:
+        """Persistencia de fin de corrida con degradación elegante (§4.2).
+
+        La escritura de la biblioteca es accionable para la capa humana
+        (UI/API), pero esta es la pata de la CORRIDA: como el lore, no tumba
+        una ejecución que ya produjo episodios — queda el fallo en voz alta en
+        auditoría y la biblioteca sigue legible en disco.
+        """
+        try:
+            self._anchor_store.save(self._project.project_id, anclas)
+        except RuntimeError as exc:
+            logger.warning("No se pudo persistir %s: %s", que, exc)
+            self._audit.log_failure(f"No se pudo persistir {que}: {exc}")
 
     # ---------------- Casting asistido (spec-recursos-ancla §8.2) ----------------
 
@@ -317,8 +331,8 @@ class GenerateSeriesUseCase:
                 f"(personaje recurrente del lore, estado 'propuesto'"
                 + (" con hero portrait generado)." if retrato is not None else ").")
             )
-        self._anchor_store.save(
-            self._project.project_id, [*biblioteca, *fusionadas]
+        self._persistir_biblioteca(
+            [*biblioteca, *fusionadas], "las propuestas de casting asistido"
         )
 
     def _retrato_hero_portrait(self, propuesta: RecursoAncla) -> Optional[ImagenAncla]:
