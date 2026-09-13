@@ -77,3 +77,77 @@ def test_viewer_episodio_sin_auditoria_lleva_el_badge_sin_qa():
     entregable["average_quality_score"] = 0.0
     html = render_deliverable_html(entregable)
     assert "sin auditoría" in html
+
+
+# ------------- Keyframes por escena (entregable 1.2, §9.2, Fase 5b) -------------
+
+
+MANIFEST = {
+    "proveedor": "gemini",
+    "modelo": "gemini-2.0-flash-exp",
+    "seed": 7,
+    "prompt_final": "A friendly young guide with short dark hair in a neon lab",
+    "anclas_usadas": [["protagonista", 1, "hero_portrait"]],
+    "parametros": {"aspect_ratio": "9:16"},
+    "id_externo": "fake-1",
+    "creado_en": "2026-09-12T00:00:00+00:00",
+}
+
+INFORME_OK = {
+    "escena": 1, "ancla_id": "protagonista", "metrica": "cara_coseno",
+    "score": 0.81, "umbral": 0.35, "aprueba": True, "detalle": "",
+}
+
+
+def _entregable_con_media() -> dict:
+    """Entregable 1.2: la escena 1 lleva keyframe (imagen + manifest + QA)
+    y las anclas citadas por su spec visual; la escena 2 queda sin media."""
+    entregable = _entregable()
+    escenas = entregable["episodes"][0]["scenes"]
+    escenas[0]["anclas"] = [
+        {"ancla_id": "protagonista", "roles": ["hero_portrait", "expression_sheet"]},
+    ]
+    escenas[0]["keyframe"] = {
+        "archivo": "mi-show/ch-01/escena_1.png",
+        "manifest": MANIFEST,
+        "qa": [INFORME_OK],
+    }
+    return entregable
+
+
+def test_viewer_muestra_el_keyframe_con_su_ruta_de_serving():
+    html = render_deliverable_html(_entregable_con_media())
+    assert "/api/media/mi-show/ch-01/escena_1.png" in html
+    assert "manifest (procedencia)" in html
+    assert "gemini-2.0-flash-exp" in html  # el proveedor/modelo del manifest
+    # El JSON viaja crudo PERO escapado (mismo patrón que los adjuntos 1.1).
+    assert "&quot;seed&quot;: 7" in html
+
+
+def test_viewer_renderiza_el_informe_qa_del_keyframe():
+    html = render_deliverable_html(_entregable_con_media())
+    assert "QA visual" in html
+    assert "cara_coseno" in html
+    assert "0.81" in html
+
+
+def test_viewer_lista_las_anclas_citadas_por_la_escena():
+    html = render_deliverable_html(_entregable_con_media())
+    assert "@protagonista" in html
+    assert "hero_portrait" in html
+    assert "expression_sheet" in html
+
+
+def test_viewer_keyframe_rechazado_por_qa_lleva_el_badge():
+    entregable = _entregable_con_media()
+    keyframe = entregable["episodes"][0]["scenes"][0]["keyframe"]
+    keyframe["qa"] = [dict(INFORME_OK, aprueba=False, score=0.1)]
+    html = render_deliverable_html(entregable)
+    assert "rechaza" in html
+
+
+def test_viewer_sin_keyframe_no_renderiza_media():
+    """Paridad: un entregable sin media no menciona serving ni QA visual."""
+    html = render_deliverable_html(_entregable())
+    assert "/api/media/" not in html
+    assert "QA visual" not in html

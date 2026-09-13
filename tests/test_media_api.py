@@ -147,6 +147,32 @@ def test_proyecto_sin_media_no_emite_eventos_de_media_en_sse(tmp_path):
     assert "event: end" in cuerpo
 
 
+def test_viewer_del_job_muestra_los_keyframes_con_manifest(tmp_path):
+    """§9.2 Viewer: el HTML del entregable 1.2 enlaza cada keyframe vía
+    ``GET /api/media/...`` y muestra el manifest (proveedor/modelo) y QA."""
+    servicio = ServicioDeMedia(tmp_path, media={
+        "keyframes": True, "proveedor_imagen": "gemini", "encadenar_frames": True,
+    })
+    job_id = servicio.correr()
+    res = servicio.client.get(f"/api/jobs/{job_id}/viewer")
+    assert res.status_code == 200
+    html = res.text
+    assert "/api/media/media-show/ch-01/escena_1.png" in html
+    assert "falso-1" in html  # modelo del manifest del puerto falso
+    assert "manifest (procedencia)" in html
+    # Y la imagen es servible de verdad por la API (misma raíz worker/API).
+    imagen = servicio.client.get("/api/media/media-show/ch-01/escena_1.png")
+    assert imagen.status_code == 200
+    assert imagen.content == b"imagen-escena-1"
+
+
+def test_viewer_sin_media_no_menciona_serving(tmp_path):
+    servicio = ServicioDeMedia(tmp_path, media=None)
+    job_id = servicio.correr()
+    html = servicio.client.get(f"/api/jobs/{job_id}/viewer").text
+    assert "/api/media/" not in html
+
+
 def test_catalogos_expone_proveedores_de_imagen(tmp_path):
     servicio = ServicioDeMedia(tmp_path, media=None)
     catalogos = servicio.client.get("/api/meta/catalogos").json()

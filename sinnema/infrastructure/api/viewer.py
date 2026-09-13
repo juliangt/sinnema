@@ -6,9 +6,11 @@ capítulos descartados, score de calidad y glosario de lore. Sin dependencias
 de frontend: HTML+CSS generados en el servidor y contenido escapado.
 
 El entregable 1.1 añade el ``alcance`` de la corrida (badge en la cabecera) y
-los ``adjuntos`` por episodio (acordeones JSON por rol). Los bloques sin
-artefacto (specs de video, dictámenes, lore) se omiten, como el patrón
-``sin auditoría``.
+los ``adjuntos`` por episodio (acordeones JSON por rol). El 1.2
+(spec-recursos-ancla §9.2) añade el bloque "Keyframes (media)" por escena:
+imagen servida por ``GET /api/media/{ruta}``, anclas citadas, manifest
+desplegable (procedencia) e informe QA. Los bloques sin artefacto (specs de
+video, dictámenes, lore) se omiten, como el patrón ``sin auditoría``.
 """
 from __future__ import annotations
 
@@ -69,6 +71,15 @@ h1 { font-size:1.5rem; margin-bottom:4px; }
 .prompt b { color:var(--tx2); font-weight:600; }
 .fallo { background:var(--panel); border:1px solid #4a2a2a; border-radius:12px;
          padding:14px 18px; margin-bottom:12px; color:var(--warn); }
+.kf { display:flex; gap:12px; align-items:flex-start; flex-wrap:wrap;
+      margin-top:8px; }
+.kf img { width:180px; display:block; border-radius:8px;
+          border:1px solid var(--line); background:#0c0f15; }
+.kf .cuerpo { flex:1; min-width:260px; }
+.kf .adjunto { margin-top:8px; }
+.chip { display:inline-block; background:#1c2440; color:var(--ac);
+        border-radius:6px; padding:1px 8px; font-size:.75rem;
+        margin:2px 6px 2px 0; }
 .lore { background:var(--panel); border:1px solid var(--line); border-radius:12px;
         padding:16px 20px; margin-top:28px; }
 .lore h2 { font-size:1rem; margin-bottom:10px; }
@@ -89,6 +100,78 @@ def _render_adjuntos(adjuntos: List[dict]) -> str:
         for a in adjuntos
     )
     return f"<div style='margin-top:10px'>{bloques}</div>"
+
+
+def _render_keyframe(escena: dict) -> str:
+    """Bloque "Keyframes (media)" de UNA escena (spec-recursos-ancla §9.2).
+
+    Imagen servida por ``GET /api/media/{ruta}`` (Fase 5b), chips con las
+    anclas citadas por la spec visual, manifest desplegable (procedencia:
+    proveedor/modelo/seed/anclas usadas) y el informe QA del candidato
+    entregado. Sin keyframe (capa apagada o fallo §6) no renderiza NADA:
+    paridad con el viewer de siempre.
+    """
+    kf = escena.get("keyframe") or {}
+    archivo = str(kf.get("archivo") or "")
+    if not archivo:
+        return ""
+    escena_num = escena.get("scene_number", "?")
+
+    citadas = "".join(
+        f"<span class='chip'>@{_esc(r.get('ancla_id'))}"
+        + (
+            f" · {_esc(', '.join(r.get('roles') or []))}"
+            if r.get("roles")
+            else ""
+        )
+        + "</span>"
+        for r in (escena.get("anclas") or [])
+    )
+    chips = f"<div>{citadas}</div>" if citadas else ""
+
+    manifest = kf.get("manifest") or {}
+    resumen = " · ".join(
+        filtro for filtro in (
+            manifest.get("proveedor"),
+            manifest.get("modelo"),
+            f"seed {manifest['seed']}" if manifest.get("seed") is not None else None,
+        ) if filtro
+    )
+    bloques = (
+        f"<details class='adjunto'><summary>manifest (procedencia)"
+        f"{': ' + _esc(resumen) if resumen else ''}</summary>"
+        f"<pre>{_esc(json.dumps(manifest, ensure_ascii=False, indent=2))}</pre>"
+        f"</details>"
+    )
+
+    informes = kf.get("qa") or []
+    if informes:
+        veredicto = (
+            "aprueba" if all(bool(i.get("aprueba")) for i in informes) else "rechaza"
+        )
+        clase = "ok" if veredicto == "aprueba" else "forzado"
+        bloques += (
+            f"<details class='adjunto'><summary>QA visual "
+            f"<span class='badge {clase}'>{veredicto}</span>"
+            f" · {len(informes)} informe/s</summary>"
+            f"<pre>{_esc(json.dumps(informes, ensure_ascii=False, indent=2))}</pre>"
+            f"</details>"
+        )
+    else:
+        bloques += (
+            "<details class='adjunto'><summary>QA visual "
+            "<span class='badge sin-qa'>sin informes</span></summary>"
+            "<pre>QA no corrió para esta escena (sin extras o previa a Fase 4).</pre>"
+            "</details>"
+        )
+
+    return (
+        f"<div class='kf'>"
+        f"<img src='/api/media/{_esc(archivo)}' alt='Keyframe escena {escena_num}' "
+        f"loading='lazy'>"
+        f"<div class='cuerpo'>{chips}{bloques}</div>"
+        f"</div>"
+    )
 
 
 def render_deliverable_html(deliverable: Dict[str, Any]) -> str:
@@ -127,7 +210,7 @@ def render_deliverable_html(deliverable: Dict[str, Any]) -> str:
                 f' · {esc.get("duration_seconds", "?")} s</span>'
                 f"<p>{_esc(esc.get('narration'))}</p>"
                 f"<p><i>{_esc(esc.get('on_screen_text'))}</i></p>"
-                f"{prompt_bloque}</div>"
+                f"{prompt_bloque}{_render_keyframe(esc)}</div>"
             )
         bloques.append(
             f'<div class="ep"><h2>{ep.get("order_index", 0):02d}. '
