@@ -141,11 +141,18 @@ class AdaptadorImagenBase(MediaGenerationPort):
     def _parametros(
         self, pedido: PedidoKeyframe, referencias, respuesta: Any
     ) -> Dict[str, Any]:
-        return {
+        parametros = {
             "aspect_ratio": pedido.aspect_ratio,
             "referencias": len(referencias),
             "encadenado": pedido.frame_inicial is not None,
         }
+        # Escalado del bucle de QA (§7): se registra en el manifest aunque el
+        # proveedor no soporte el parámetro (los actuales no exponen peso/seed).
+        if pedido.peso_referencia is not None:
+            parametros["peso_referencia"] = pedido.peso_referencia
+        if pedido.seed is not None:
+            parametros["seed"] = pedido.seed
+        return parametros
 
     # ------------------------------ manifest ------------------------------
 

@@ -83,6 +83,14 @@ class PedidoKeyframe(BaseModel):
         default=None,
         description="Último frame de la escena anterior (encadenado §3.4); bytes de imagen.",
     )
+    peso_referencia: Optional[float] = Field(
+        default=None,
+        description="Peso de las referencias (escalado §7 en regeneraciones; None = pedido inicial).",
+    )
+    seed: Optional[int] = Field(
+        default=None,
+        description="Seed del intento (§7: cada regeneración lleva seed nueva; None = inicial).",
+    )
 
     @field_validator("prompt_final")
     @classmethod

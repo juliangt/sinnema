@@ -127,6 +127,7 @@ def construir_dependencias_de_media(
         almacen=almacen,
         eventos=eventos,
         proveedor=proveedor,
+        qa=construir_qa_visual(anchor_store),
     )
 
 

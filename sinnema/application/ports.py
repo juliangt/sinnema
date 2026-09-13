@@ -7,18 +7,20 @@ adaptador concreto. Así el grafo se puede testear con dobles en memoria.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Final, Optional, Protocol, Sequence, Type, TypeVar
+from typing import Any, Callable, Dict, Final, List, Optional, Protocol, Sequence, Tuple, Type, TypeVar
 
 from pydantic import BaseModel
 
 from sinnema.domain.models import (
     AdaptedScript,
     ContinuityDirectives,
+    InformeQaVisual,
     LoreEntry,
     MediaCrudo,
     PedidoKeyframe,
     QualityAudit,
     RecursoAncla,
+    ReferenciaAncla,
     ScriptDraft,
     SeriesPlan,
     TechnicalPackage,
@@ -220,6 +222,27 @@ class MediaStorePort(Protocol):
         ...
 
 
+class QaVisualPort(Protocol):
+    """Puerto de QA visual (spec-recursos-ancla §7): compara un keyframe contra
+    la biblioteca lockeada. La aplicación solo conoce el contrato; las métricas
+    pesadas (ArcFace/DINOv2/CLIP/pHash) son del adaptador de infraestructura
+    (extra opcional ``sinnema[qa]``, degradación elegante si falta).
+    """
+
+    def evaluar_keyframe(
+        self,
+        *,
+        escena: int,
+        project_id: str,
+        prompt: str,
+        datos_keyframe: bytes,
+        pares: Sequence[Tuple[ReferenciaAncla, RecursoAncla]],
+        previos: Sequence[Tuple[int, bytes]] = (),
+    ) -> Tuple[List[InformeQaVisual], List[str]]:
+        """Devuelve ``(informes, avisos)``: veredictos validados + métricas omitidas."""
+        ...
+
+
 @dataclass(frozen=True)
 class DependenciasMedia:
     """Paquete de media inyectable en el grafo (opcional, spec §6/Hito 3).
@@ -230,13 +253,15 @@ class DependenciasMedia:
     ``{"tipo": "media_start"|"media_end", "escena": n, "proveedor": ...}`` y
     el runner lo traduce a los eventos del job que llegan a SSE. ``proveedor``
     es el nombre del adaptador ("gemini"/"openai"): puramente informativo
-    (eventos y auditoría).
+    (eventos y auditoría). ``qa`` (opcional, Fase 4) es el servicio de QA
+    visual: presente, el nodo ejecuta el bucle acotado de regeneración §7.
     """
 
     puerto: MediaGenerationPort
     almacen: MediaStorePort
     eventos: Optional[Callable[[Dict[str, Any]], None]] = None
     proveedor: str = ""
+    qa: Optional[QaVisualPort] = None
 
 
 class StructuredGenerationPort(Protocol):
