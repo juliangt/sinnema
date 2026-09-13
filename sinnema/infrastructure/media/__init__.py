@@ -21,6 +21,14 @@ from sinnema.infrastructure.media.fabrica import (
 )
 from sinnema.infrastructure.media.gemini import AdaptadorGeminiImage
 from sinnema.infrastructure.media.openai import AdaptadorOpenAIImage
+from sinnema.infrastructure.media.qa import (
+    DISTANCIA_PHASH_GEMELA,
+    UMBRAL_CARA_DEFAULT,
+    UMBRAL_PROMPT_DEFAULT,
+    QaVisualService,
+    coseno,
+    distancia_hamming,
+)
 from sinnema.infrastructure.media.resolver import (
     ReferenciaResuelta,
     ResolverDeBateria,
@@ -35,16 +43,23 @@ __all__ = [
     "AdaptadorOpenAIImage",
     "AlmacenMedia",
     "DEFAULT_MEDIA_ROOT",
+    "DISTANCIA_PHASH_GEMELA",
     "INTENTOS_DEFAULT",
     "PoliticaReintentos",
     "PROVEEDOR_DEFAULT",
     "PROVEEDORES_DE_IMAGEN",
+    "QaVisualService",
     "ReferenciaResuelta",
     "ResolverDeBateria",
+    "UMBRAL_CARA_DEFAULT",
+    "UMBRAL_PROMPT_DEFAULT",
     "cargador_de_baterias",
+    "coseno",
     "con_reintentos",
     "construir_dependencias_de_media",
     "construir_puerto_de_media",
+    "construir_qa_visual",
+    "distancia_hamming",
     "politica_del_entorno",
     "resolver_proveedor",
 ]

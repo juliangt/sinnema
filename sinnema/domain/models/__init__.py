@@ -27,9 +27,11 @@ from sinnema.domain.models.continuity import (
 )
 from sinnema.domain.models.media import (
     ErrorDeMedia,
+    InformeQaVisual,
     MediaCrudo,
     MediaDelEpisodio,
     MediaGenerado,
+    MetricaQa,
     PedidoKeyframe,
 )
 from sinnema.domain.models.deliverable import (
@@ -65,11 +67,13 @@ __all__ = [
     "FormatProfile",
     "ImagenAncla",
     "ErrorDeMedia",
+    "InformeQaVisual",
     "LoreEntry",
     "ManifestDeGeneracion",
     "MediaCrudo",
     "MediaDelEpisodio",
     "MediaGenerado",
+    "MetricaQa",
     "NotasDelAgente",
     "PedidoKeyframe",
     "QualityAudit",

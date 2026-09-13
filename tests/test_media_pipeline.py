@@ -275,7 +275,7 @@ def test_corrida_con_keyframes_adjunta_media_con_manifest_ordenado(tmp_path):
     assert len(media_episodio["keyframes"]) == 6  # una por escena del paquete
     primero = media_episodio["keyframes"][0]
     assert primero["archivo"] == f"{PROJECT_ID}/ch-01/escena_1.png"
-    assert primero["qa"] is None  # Fase 4
+    assert primero["qa"] == []  # Fase 4: informes vacíos sin QA corrido
     manifest = primero["manifest"]
     assert manifest["proveedor"] == "falso"
     assert manifest["prompt_final"] == puerto.pedidos[0].prompt_final

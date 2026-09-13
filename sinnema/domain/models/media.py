@@ -14,7 +14,7 @@ biblioteca (entidades, baterías, manifests de sus imágenes).
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -23,6 +23,38 @@ from sinnema.domain.models.anclas import (
     ReferenciaAncla,
     _rechazar_espanol,
 )
+
+#: Métricas del QA visual (spec-recursos-ancla §7): similitud de cara con la
+#: batería, escena sin cara (embeddings), adherencia prompt-imagen y dedup de
+#: keyframes gemelas del capítulo.
+MetricaQa = Literal["cara_coseno", "escena_dino", "clip_prompt", "phash_dedup"]
+
+
+class InformeQaVisual(BaseModel):
+    """Veredicto del QA visual sobre UNA comparación (spec-recursos-ancla §7).
+
+    Un keyframe puede compararse contra varias anclas y varias métricas: cada
+    comparación produce un informe. Un keyframe aprueba solo si TODOS sus
+    informes aprueban. ``ancla_id`` vacío = hallazgo a nivel de capítulo (el
+    dedup de escenas gemelas no corresponde a una ancla).
+    """
+
+    escena: int = Field(..., ge=1)
+    ancla_id: str = Field(
+        default="",
+        description="Ancla comparada; vacío = hallazgo a nivel capítulo (dedup).",
+    )
+    metrica: MetricaQa
+    score: float = Field(
+        ...,
+        description="Similitud medida (coseno [-1,1] o distancia de Hamming para dedup).",
+    )
+    umbral: float = Field(
+        ...,
+        description="Umbral de la métrica (mínimo exigido, o máximo para dedup).",
+    )
+    aprueba: bool
+    detalle: str = Field(default="", description="Contexto accionable del veredicto.")
 
 
 class PedidoKeyframe(BaseModel):
@@ -85,9 +117,12 @@ class MediaGenerado(BaseModel):
         description="Ruta relativa bajo la raíz de media: <project_id>/<chapter_id>/escena_<n>.<ext>.",
     )
     manifest: ManifestDeGeneracion
-    #: Fase 4 (QA visual): lo llena el bucle de regeneración con el
-    #: ``InformeQaVisual``; hasta entonces siempre ``None``.
-    qa: Optional[Dict[str, Any]] = None
+    #: Informes de QA del candidato ENTREGADO (spec §7). Es una lista y no un
+    #: ``Optional[InformeQaVisual]`` porque una escena se compara contra varias
+    #: anclas y métricas; los intentos intermedios del bucle de regeneración
+    #: viajan aparte en ``MediaDelEpisodio.qa_agotado``. Vacío = QA no corrido
+    #: (sin extras instalados) o escena previa a la Fase 4.
+    qa: List[InformeQaVisual] = Field(default_factory=list)
 
 
 class ErrorDeMedia(BaseModel):
@@ -114,3 +149,7 @@ class MediaDelEpisodio(BaseModel):
     chapter_id: str = Field(..., min_length=1)
     keyframes: List[MediaGenerado] = Field(default_factory=list)
     errores: List[ErrorDeMedia] = Field(default_factory=list)
+    #: Informes de QA de TODOS los intentos de las escenas que agotaron su
+    #: bucle de regeneración sin aprobar (spec §7: política honesta — el mejor
+    #: candidato se entrega, pero los intentos quedan visibles).
+    qa_agotado: List[InformeQaVisual] = Field(default_factory=list)

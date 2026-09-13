@@ -130,6 +130,46 @@ def construir_dependencias_de_media(
     )
 
 
+def construir_qa_visual(anchor_store: JsonAnchorStore) -> Optional["QaVisualService"]:
+    """QA visual si el extra ``sinnema[qa]`` está instalado (spec §7, §13-F4).
+
+    Construye cada extractor en su propio bloque: una instalación parcial deja
+    correr las métricas cuyas libs sí están (el servicio omite el resto con
+    aviso). Sin NINGÚN extractor devuelve ``None`` y el nodo ``render_keyframes``
+    avanza sin QA registrando el aviso — degradación elegante, nunca un tumbón.
+    """
+    cargar = cargador_de_baterias(anchor_store)
+
+    def con_intento(constructor):
+        try:
+            return constructor()
+        except Exception as exc:  # noqa: BLE001 - falta de deps/libs del extra 'qa'
+            logger.info(
+                "QA visual: extractor no disponible (%s: %s) — su métrica se omite.",
+                type(exc).__name__, exc,
+            )
+            return None
+
+    from sinnema.infrastructure.media.extractores import (
+        ExtractorCarasInsightFace,
+        ExtractorDinoClip,
+        HasherPHash,
+    )
+    from sinnema.infrastructure.media.qa import QaVisualService
+
+    caras = con_intento(ExtractorCarasInsightFace)
+    embeddings = con_intento(ExtractorDinoClip)
+    hasher = con_intento(HasherPHash)
+    if caras is None and embeddings is None and hasher is None:
+        return None
+    return QaVisualService(
+        cargar_imagen=cargar,
+        extractor_caras=caras,
+        extractor_embeddings=embeddings,
+        hasher=hasher,
+    )
+
+
 def construir_puerto_de_media(
     proveedor: str,
     project_id: str,

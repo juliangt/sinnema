@@ -82,7 +82,7 @@ def test_media_crudo_y_manifest_son_contratos_validos():
     from sinnema.domain.models import MediaGenerado
 
     generado = MediaGenerado(archivo="sinnema/ch-01/escena_1.png", manifest=manifest)
-    assert generado.qa is None
+    assert generado.qa == []  # Fase 4: sin QA corrido, la lista nace vacía
     serializado = json.dumps(generado.model_dump(mode="json"))  # viaja en adjunto
     assert "escena_1.png" in serializado
 
