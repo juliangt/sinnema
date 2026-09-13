@@ -18,6 +18,8 @@ export const KINDS_EVENTOS = [
   'token',
   'tool_start',
   'tool_end',
+  'media_start',
+  'media_end',
   'progress',
   'error',
   'done',

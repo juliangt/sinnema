@@ -51,6 +51,8 @@ export interface Ancla {
   version: number
   chapter_first_seen?: string | null
   chapter_last_seen?: string | null
+  qa_medio?: number | null // QA medio del media entregado (Fase 4); null = sin muestras
+  qa_muestras?: number
 }
 
 // ── Config LLM por agente ([agentes.<rol>] resuelto: proyecto > default) ──
@@ -196,6 +198,24 @@ export type RuntimeExecutionEvent =
       args: unknown
     }
   | { kind: 'tool_end'; ts: string; job_id: string; node: string; rol: string; tool: string; resumen: string }
+  | {
+      kind: 'media_start'
+      ts: string
+      job_id: string
+      escena: number
+      proveedor: string
+    }
+  | {
+      kind: 'media_end'
+      ts: string
+      job_id: string
+      escena: number
+      proveedor: string
+      archivo?: string
+      error?: string
+      qa?: string // 'aprobado' | 'agotado' (QA visual, Fase 4)
+      intentos?: number
+    }
   | { kind: 'progress' | 'error' | 'done'; ts: string; job_id: string; mensaje: string }
 
 // ── Auditoría (GET /api/jobs/{id}/artifacts[/{n}]) ────────────────────────

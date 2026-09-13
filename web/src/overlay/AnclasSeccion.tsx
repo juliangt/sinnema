@@ -20,6 +20,11 @@ const COLOR_DE_ESTADO: Record<EstadoDeAncla, string> = {
 
 const EXTENSIONES_ACEPTADAS = '.png,.jpg,.jpeg,.webp'
 
+// Umbrales del badge QA medio (spec-recursos-ancla §7/§14): el default del QA
+// de cara es 0.35; por debajo de 0.2 la batería está degradada.
+const UMBRAL_QA_BUENO = 0.35
+const UMBRAL_QA_REGULAR = 0.2
+
 /** URL de serving de una imagen de batería (content-type fijo por extensión). */
 function urlDeImagen(projectId: string, anclaId: string, archivo: string): string {
   return (
@@ -80,6 +85,20 @@ function TarjetaAncla({
         <span className="text-[9px] text-texto-suave" title="versión de la batería">
           v{ancla.version}
         </span>
+        {ancla.qa_medio !== null && ancla.qa_medio !== undefined && (
+          <span
+            className={`rounded border px-1 text-[9px] ${
+              ancla.qa_medio >= UMBRAL_QA_BUENO
+                ? 'border-emerald-500/40 text-emerald-300'
+                : ancla.qa_medio >= UMBRAL_QA_REGULAR
+                  ? 'border-amber-500/40 text-amber-300'
+                  : 'border-red-500/40 text-red-300'
+            }`}
+            title={`QA medio del media entregado sobre ${ancla.qa_muestras ?? 0} muestra(s): detecta baterías degradadas (§14)`}
+          >
+            QA {ancla.qa_medio.toFixed(2)}
+          </span>
+        )}
       </div>
 
       {porRol.size > 0 && (

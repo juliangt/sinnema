@@ -547,12 +547,49 @@ def create_app(
                 409 if "duplicado" in str(exc) else 400, str(exc)
             ) from exc
 
+    def _qa_medio_por_ancla(project_id: str) -> Dict[str, Tuple[float, int]]:
+        """QA medio por ancla sobre el media ENTREGADO de los jobs completados
+        del proyecto (spec-recursos-ancla §9.2/§14: detectar baterías
+        degradadas). Solo informes del candidato entregado por escena (los
+        intentos intermedios ya están en ``qa_agotado`` y duplicarían); los
+        informes de dedup (``ancla_id`` vacío) no corresponden a un ancla."""
+        acumulado: Dict[str, List[float]] = {}
+        for job in store.list_jobs(project_id=project_id):
+            entregable = job.deliverable
+            if not entregable:
+                continue
+            for episodio in entregable.get("episodes", []):
+                for adjunto in episodio.get("adjuntos", []):
+                    if adjunto.get("rol") != "media":
+                        continue
+                    keyframes = adjunto.get("artefacto", {}).get("keyframes", [])
+                    for kf in keyframes:
+                        for informe in kf.get("qa", []):
+                            ancla_id = informe.get("ancla_id") or ""
+                            if not ancla_id:
+                                continue
+                            acumulado.setdefault(ancla_id, []).append(
+                                float(informe.get("score", 0.0))
+                            )
+        return {
+            ancla: (sum(scores) / len(scores), len(scores))
+            for ancla, scores in acumulado.items()
+        }
+
     @app.get("/api/projects/{project_id}/anclas")
     def project_anclas(project_id: str) -> list[dict]:
         """Biblioteca de anclas del proyecto completa (batería, estado,
-        version; spec-recursos-ancla §9.1)."""
+        version, QA medio del media entregado; spec-recursos-ancla §9.1)."""
         _proyecto_o_404(project_id)
-        return [a.model_dump(mode="json") for a in _biblioteca(project_id)]
+        qa_medio = _qa_medio_por_ancla(project_id)
+        salida = []
+        for ancla in _biblioteca(project_id):
+            datos = ancla.model_dump(mode="json")
+            media, muestras = qa_medio.get(ancla.ancla_id, (None, 0))
+            datos["qa_medio"] = None if media is None else round(media, 3)
+            datos["qa_muestras"] = muestras
+            salida.append(datos)
+        return salida
 
     @app.post("/api/projects/{project_id}/anclas", status_code=201)
     def crear_ancla(project_id: str, cuerpo: dict) -> dict:

@@ -199,3 +199,19 @@ describe('AnclasSeccion', () => {
     await waitFor(() => expect(api.retirarAncla).toHaveBeenCalledWith('mi-show', 'protagonista'))
   })
 })
+
+  it('muestra el badge de QA medio de la tarjeta cuando hay muestras (Fase 4)', async () => {
+    vi.mocked(api.anclas).mockResolvedValue([
+      ancla({ estado: 'lockeado', qa_medio: 0.41, qa_muestras: 3 }),
+      ancla({ ancla_id: 'degradada', nombre: 'Villano', qa_medio: 0.12, qa_muestras: 2 }),
+      ancla({ ancla_id: 'sin-qa', nombre: 'Sin QA' }),
+    ])
+    montar()
+
+    const buena = await screen.findByTestId('ancla-protagonista')
+    expect(within(buena).getByText('QA 0.41')).toBeTruthy()
+    const degradada = screen.getByTestId('ancla-degradada')
+    expect(within(degradada).getByText('QA 0.12')).toBeTruthy()
+    // Sin muestras de QA: la tarjeta no lleva badge.
+    expect(within(screen.getByTestId('ancla-sin-qa')).queryByText(/QA \d/)).toBeNull()
+  })

@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from sinnema.infrastructure.anclas import JsonAnchorStore
 from sinnema.infrastructure.api.app import TAMANO_MAXIMO_DE_IMAGEN, create_app
 from sinnema.infrastructure.projects import ProjectFileStore
-from sinnema.infrastructure.runtime.jobs import SqliteJobStore
+from sinnema.infrastructure.runtime.jobs import JobStatus, SqliteJobStore
 from sinnema.infrastructure.runtime.runner import SeriesWorker
 
 from conftest import gateway_con_serie, make_imagen_ancla
@@ -370,3 +370,82 @@ def test_serving_rechaza_symlink_que_escapa(cliente_anclas, tmp_path):
 
     res = client.get("/api/projects/mi-show/anclas/protagonista/imagenes/trap.png")
     assert res.status_code == 404
+
+
+# --------------------------- QA medio por ancla ----------------------------
+
+
+def test_qa_medio_por_ancla_sale_del_media_entregado(tmp_path):
+    """Fase 4 (§9.2/§14): el GET de anclas incluye el QA medio del media
+    entregado por los jobs completados; sin jobs, el campo queda en null."""
+    store = SqliteJobStore(tmp_path / "jobs.sqlite")
+    project_store = ProjectFileStore(tmp_path / "escribible", tmp_path / "empaquetado")
+    worker = SeriesWorker(
+        store,
+        checkpoint_dir=tmp_path / "checkpoints",
+        audit_root=tmp_path / "auditoria",
+        lore_root=tmp_path / "continuidad",
+        gateway_factory=lambda proyecto: gateway_con_serie(num_chapters=1),
+        project_loader=project_store.load,
+    )
+    client = TestClient(create_app(
+        store=store, worker=worker, data_dir=tmp_path,
+        project_store=project_store,
+    ))
+    cuerpo = {
+        "proyecto": {
+            "id": "mi-show", "marca": "Mi Show",
+            "concepto": "micro-videos de prueba verticales",
+            "tema_por_defecto": "Un tema de prueba suficientemente largo",
+            "idioma": "Español",
+        },
+        "voz": {
+            "audiencia": "Audiencia de prueba", "contexto_cultural": "Contexto",
+            "tono": "tono cercano", "guia_de_estilo": "guía de estilo",
+            "restricciones": "restricciones",
+        },
+        "visual": {"estilo_maestro": "3D render style with clean environment and lighting"},
+    }
+    assert client.post("/api/projects", json=cuerpo).status_code == 201
+    assert _alta(client).status_code == 201
+
+    # Sin jobs: qa_medio null y cero muestras.
+    anclas = client.get("/api/projects/mi-show/anclas").json()
+    assert anclas[0]["qa_medio"] is None
+    assert anclas[0]["qa_muestras"] == 0
+
+    # Un job completado cuyo entregable trae el adjunto media con QA.
+    job = store.create_job(
+        owner="ana", project_id="mi-show", topic="Un tema largo de prueba",
+        num_chapters=1, max_critique_attempts=1,
+    )
+    entregable = {
+        "episodes": [{
+            "adjuntos": [{
+                "rol": "media",
+                "artefacto": {
+                    "chapter_id": "ch-01",
+                    "keyframes": [{
+                        "archivo": "mi-show/ch-01/escena_1.png",
+                        "manifest": {},
+                        "qa": [
+                            {"escena": 1, "ancla_id": "protagonista",
+                             "metrica": "cara_coseno", "score": 0.5,
+                             "umbral": 0.35, "aprueba": True, "detalle": ""},
+                            {"escena": 1, "ancla_id": "",
+                             "metrica": "phash_dedup", "score": 10.0,
+                             "umbral": 10.0, "aprueba": False, "detalle": ""},
+                        ],
+                    }],
+                    "errores": [],
+                    "qa_agotado": [],
+                },
+            }],
+        }],
+    }
+    store.set_status(job.job_id, JobStatus.COMPLETED, deliverable=entregable)
+
+    anclas = client.get("/api/projects/mi-show/anclas").json()
+    protagonista = anclas[0]
+    assert protagonista["qa_medio"] == 0.5  # el dedup (sin ancla_id) no cuenta
+    assert protagonista["qa_muestras"] == 1
