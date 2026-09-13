@@ -313,6 +313,9 @@ class SeriesWorker:
             deliverable = build_deliverable(estado_final)
             use_case.save_lore(estado_final)
             use_case.save_anclas(estado_final)
+            # Casting asistido (spec-recursos-ancla §8.2): propuestas de ancla
+            # para personajes recurrentes del lore sin ancla (best-effort).
+            use_case.save_casting(estado_final)
             return deliverable.model_dump(mode="json")
         finally:
             conn.close()

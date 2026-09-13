@@ -2,7 +2,9 @@
 from sinnema.domain.services.anclas import (
     anclas_referenciadas,
     cobertura_casting,
+    proponer_casting,
     registrar_vigencia_de_anclas,
+    slug_de_termino,
     validate_anchor_refs,
     validate_continuity_anchors,
 )
@@ -41,7 +43,9 @@ __all__ = [
     "identity_adaptation",
     "merge_lore",
     "pares_identidad_primero",
+    "proponer_casting",
     "registrar_vigencia_de_anclas",
+    "slug_de_termino",
     "validate_adaptation_format",
     "validate_adaptation_matches_draft",
     "validate_anchor_refs",

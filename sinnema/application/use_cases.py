@@ -23,8 +23,13 @@ from sinnema.application.settings import PipelineSettings
 from sinnema.application.state import PipelineState
 from sinnema.domain.constants import ALCANCE_DEFAULT
 from sinnema.domain.exceptions import DomainValidationError
-from sinnema.domain.models import RecursoAncla, SeriesDeliverable
-from sinnema.domain.services import merge_lore
+from sinnema.domain.models import (
+    ImagenAncla,
+    PedidoKeyframe,
+    RecursoAncla,
+    SeriesDeliverable,
+)
+from sinnema.domain.services import merge_lore, proponer_casting
 
 logger = logging.getLogger("sinnema.use_cases")
 
@@ -271,12 +276,97 @@ class GenerateSeriesUseCase:
         if cambio:
             self._anchor_store.save(self._project.project_id, fusion)
 
+    # ---------------- Casting asistido (spec-recursos-ancla §8.2) ----------------
+
+    def save_casting(self, state: Optional[PipelineState]) -> None:
+        """Propuestas de ancla para personajes recurrentes sin ancla (§8.2).
+
+        Consolidación de fin de corrida (junto a ``save_lore``/``save_anclas``):
+        los términos de lore ``personaje`` sin ``ancla_id`` y recurrentes
+        (≥2 episodios, ver ``proponer_casting``) nacen como anclas
+        ``propuesto`` fusionadas con la biblioteca persistida SIN pisar nada
+        existente (borradores/propuestas quedan tal cual). Con la capa de
+        media activa se intenta además un hero portrait (``origen='generada'``
+        con su manifest) guardado en la batería de la propuesta; si la
+        generación falla la propuesta queda sin batería y la corrida sigue:
+        el media nunca tumba.
+        """
+        if state is None or not self._project.anclas:
+            return
+        entradas = state.get("lore_entries", [])
+        if not entradas:
+            return
+        plan = state.get("series_plan")
+        biblioteca = self._anchor_store.load(self._project.project_id)
+        propuestas = proponer_casting(
+            entradas, list(plan.chapters) if plan else [], biblioteca
+        )
+        if not propuestas:
+            return
+        fusionadas: List[RecursoAncla] = []
+        for propuesta in propuestas:
+            retrato = self._retrato_hero_portrait(propuesta)
+            if retrato is not None:
+                propuesta = RecursoAncla.model_validate({
+                    **propuesta.model_dump(mode="json"),
+                    "bateria": [retrato.model_dump(mode="json")],
+                })
+            fusionadas.append(propuesta)
+            self._audit.log_event(
+                f"Casting asistido: propuesta de ancla '{propuesta.ancla_id}' "
+                f"(personaje recurrente del lore, estado 'propuesto'"
+                + (" con hero portrait generado)." if retrato is not None else ").")
+            )
+        self._anchor_store.save(
+            self._project.project_id, [*biblioteca, *fusionadas]
+        )
+
+    def _retrato_hero_portrait(self, propuesta: RecursoAncla) -> Optional[ImagenAncla]:
+        """Hero portrait de una propuesta vía el puerto de media inyectado.
+
+        Pedido mínimo (prompt = descriptor canónico, sin anclas, sin capítulo
+        real); el archivo va directo a la carpeta de batería del ancla con la
+        convención ``<rol>_<n>.<ext>`` del upload. Cualquier fallo devuelve
+        ``None`` (propuesta sin batería): el media nunca tumba la corrida.
+        """
+        media = self._media
+        if media is None or not self._project.media.keyframes:
+            return None
+        pedido = PedidoKeyframe(
+            scene_number=1,
+            chapter_id="casting",
+            prompt_final=propuesta.descripcion_canonica,
+        )
+        try:
+            crudo = media.puerto.generar_keyframe(pedido, [])
+            retrato = ImagenAncla(
+                rol="hero_portrait",
+                archivo=f"hero_portrait_1.{crudo.formato}",
+                origen="generada",
+                manifest=crudo.manifest,
+            )
+            self._anchor_store.guardar_imagen(
+                self._project.project_id,
+                propuesta.ancla_id,
+                retrato.archivo,
+                crudo.datos,
+            )
+            return retrato
+        except Exception as exc:  # noqa: BLE001 - §8: el media nunca tumba
+            logger.warning(
+                "Casting asistido: la propuesta '%s' queda sin hero portrait "
+                "(%s: %s).",
+                propuesta.ancla_id, type(exc).__name__, exc,
+            )
+            return None
+
     def execute(self, request: SeriesRequest) -> SeriesDeliverable:
-        """Ejecuta la serie completa, persiste lore y vigencia de anclas, y
-        devuelve el entregable."""
+        """Ejecuta la serie completa, persiste lore, vigencia de anclas y
+        propuestas de casting, y devuelve el entregable."""
         estado_final: Optional[PipelineState] = None
         for estado_final in self.stream(request):
             pass
         self.save_lore(estado_final)
         self.save_anclas(estado_final)
+        self.save_casting(estado_final)
         return build_deliverable(estado_final)
