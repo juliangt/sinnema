@@ -16,6 +16,9 @@ Expone el caso de uso existente como producto distribuible:
 - ``POST /api/projects/{id}/anclas/{a}/imagenes``  upload a la batería,
 - ``GET  /api/projects/{id}/anclas/{a}/imagenes/{f}`` serving de la batería,
 - ``POST /api/projects/{id}/anclas/{a}/lock``      lock con batería mínima,
+- ``GET  /api/projects/{id}/anclas/{a}/imagenes/{f}`` serving de la batería,
+- ``POST /api/projects/{id}/anclas/{a}/lock``      lock con batería mínima,
+- ``GET  /api/media/{ruta}``             serving de keyframes del pipeline,
 - ``GET  /api/jobs/{id}/anclas-candidatas``        candidatos de promoción (§8.1),
 - ``POST /api/projects/{id}/anclas/{a}/promover``  lock humano de candidatos (§8.1),
 - ``GET  /api/meta/roles``           catálogo de agentes para el formulario,
@@ -93,6 +96,7 @@ from sinnema.infrastructure.media import (
     AlmacenMedia,
     construir_dependencias_de_media,
 )
+from sinnema.infrastructure.media.almacen import FORMATOS_DE_IMAGEN
 from sinnema.infrastructure.projects import (
     ProjectFileStore,
     packaged_projects_dir,
@@ -139,6 +143,13 @@ EXTENSIONES_DE_IMAGEN = {
     ".webp": "image/webp",
 }
 TAMANO_MAXIMO_DE_IMAGEN = 10 * 1024 * 1024  # 10 MB
+
+#: Content-type de los keyframes del pipeline (spec-recursos-ancla §9.2):
+#: mismas formas que genera ``AlmacenMedia`` (extensión SIN punto; ``jpeg``
+#: canónico, sin alias ``jpg``).
+EXTENSIONES_DE_MEDIA = {
+    f".{formato}": f"image/{formato}" for formato in sorted(FORMATOS_DE_IMAGEN)
+}
 
 #: Sugerencia determinista de rol de batería para un candidato de media
 #: (spec-recursos-ancla §8.1, Fase 5): el TIPO del ancla decide el rol más
@@ -821,6 +832,31 @@ def create_app(
             )
             ancla = lockeada
         return ancla.model_dump(mode="json")
+
+    # ----------------- Serving de media del pipeline (§9.2) -----------------
+
+    @app.get("/api/media/{ruta:path}")
+    def servir_media(ruta: str):
+        """Serving de keyframes del pipeline (spec-recursos-ancla §9.2): la
+        ruta relativa de ``MediaGenerado.archivo`` (``<project>/<chapter>/
+        escena_<n>.<ext>``) resuelta por ``AlmacenMedia.ruta_de``, que ya
+        valida slugs, forma del nombre, lista blanca de formatos y contención
+        real tras symlinks. Lo que no pasa la validación (o no existe) es 404
+        sin exponer el sistema de archivos."""
+        try:
+            destino = almacen_media.ruta_de(ruta)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        media_type = EXTENSIONES_DE_MEDIA.get(destino.suffix.lower())
+        if media_type is None or not destino.is_file():
+            raise HTTPException(404, f"El media '{ruta}' no existe.")
+        # Una re-corrida del MISMO proyecto/capítulo re-escribe escena_<n>.<ext>:
+        # cache corto (el de batería puede ser largo; este no).
+        return FileResponse(
+            destino,
+            media_type=media_type,
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
 
     # ---------------- Promoción de keyframes a batería (§8.1) ----------------
 
