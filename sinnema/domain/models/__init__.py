@@ -25,6 +25,13 @@ from sinnema.domain.models.continuity import (
     ContinuityDirectives,
     LoreEntry,
 )
+from sinnema.domain.models.media import (
+    ErrorDeMedia,
+    MediaCrudo,
+    MediaDelEpisodio,
+    MediaGenerado,
+    PedidoKeyframe,
+)
 from sinnema.domain.models.deliverable import (
     ApprovedEpisode,
     ArtefactoAdjunto,
@@ -57,9 +64,14 @@ __all__ = [
     "FinalScene",
     "FormatProfile",
     "ImagenAncla",
+    "ErrorDeMedia",
     "LoreEntry",
     "ManifestDeGeneracion",
+    "MediaCrudo",
+    "MediaDelEpisodio",
+    "MediaGenerado",
     "NotasDelAgente",
+    "PedidoKeyframe",
     "QualityAudit",
     "RecursoAncla",
     "ReferenciaAncla",

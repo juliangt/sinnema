@@ -6,6 +6,7 @@ adaptador concreto. Así el grafo se puede testear con dobles en memoria.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, Final, Optional, Protocol, Sequence, Type, TypeVar
 
 from pydantic import BaseModel
@@ -14,6 +15,8 @@ from sinnema.domain.models import (
     AdaptedScript,
     ContinuityDirectives,
     LoreEntry,
+    MediaCrudo,
+    PedidoKeyframe,
     QualityAudit,
     RecursoAncla,
     ScriptDraft,
@@ -162,6 +165,75 @@ EventoGeneracion = Dict[str, Any]
 
 #: Callback opcional de streaming que consume el adaptador por cada evento.
 EventCallback = Callable[[EventoGeneracion], None]
+
+
+class MediaGenerationPort(Protocol):
+    """Puerto de generación de media (spec-recursos-ancla §6).
+
+    El nodo estructural ``render_keyframes`` compone un ``PedidoKeyframe`` por
+    escena y lo entrega aquí; el adaptador concreto (Gemini image, OpenAI
+    gpt-image-1, ...) traduce las referencias al payload nativo vía su
+    resolver, reintenta fallos de transporte y devuelve los bytes crudos con
+    su manifest de procedencia. NUNCA escribe archivos: persistir es política
+    de la aplicación (nodo + ``MediaStorePort``).
+
+    Degradación elegante (mismo espíritu que los proveedores LLM): el
+    adaptador se construye sin claves ni SDK instalado; usarlo lanza un
+    ``RuntimeError`` con instrucciones accionables.
+    """
+
+    def generar_keyframe(
+        self,
+        pedido: PedidoKeyframe,
+        catalogo: Sequence[RecursoAncla],
+    ) -> MediaCrudo:
+        """Genera el keyframe de la escena del pedido.
+
+        ``catalogo`` es la biblioteca lockeada del proyecto (el slot
+        ``anclas`` del estado): el resolver del adaptador resuelve cada
+        ``ancla_id`` contra él y verifica los máximos del proveedor ANTES de
+        la llamada (excederlos es un error de wiring local, ``ValueError`` —
+        §11.3 —, no un fallo remoto).
+        """
+        ...
+
+
+class MediaStorePort(Protocol):
+    """Puerto de persistencia del media generado por el pipeline.
+
+    El nodo ``render_keyframes`` le entrega los bytes que devolvió el puerto
+    de generación; cómo y dónde se guardan es cosa del adaptador (p. ej.
+    ``media/<project_id>/<chapter_id>/escena_<n>.<ext>`` bajo la raíz de
+    datos). Devuelve la ruta relativa (portable) que viaja en
+    ``MediaGenerado.archivo``.
+    """
+
+    def guardar_keyframe(
+        self,
+        project_id: str,
+        chapter_id: str,
+        escena: int,
+        formato: str,
+        datos: bytes,
+    ) -> str:
+        """Escribe el keyframe y devuelve su ruta relativa bajo la raíz de media."""
+        ...
+
+
+@dataclass(frozen=True)
+class DependenciasMedia:
+    """Paquete de media inyectable en el grafo (opcional, spec §6/Hito 3).
+
+    ``None`` en el use case/grafo = corrida sin capa de media (nodo
+    ``render_keyframes`` ni se inserta: paridad con el pipeline de siempre).
+    ``eventos`` es el canal en vivo de progreso: el nodo emite
+    ``{"tipo": "media_start"|"media_end", "escena": n, "proveedor": ...}`` y
+    el runner lo traduce a los eventos del job que llegan a SSE.
+    """
+
+    puerto: MediaGenerationPort
+    almacen: MediaStorePort
+    eventos: Optional[Callable[[Dict[str, Any]], None]] = None
 
 
 class StructuredGenerationPort(Protocol):
