@@ -501,6 +501,8 @@ def create_app(
     def _biblioteca(project_id: str) -> list[RecursoAncla]:
         try:
             return anchor_store.load(project_id)
+        except ValueError as exc:  # slug imposible: no expone 500 ni rutas
+            raise HTTPException(404, str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(409, str(exc)) from exc
 
