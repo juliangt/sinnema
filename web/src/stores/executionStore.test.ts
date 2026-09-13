@@ -123,6 +123,28 @@ describe('eventos de media (recursos-ancla Fase 4)', () => {
     expect(log[0].texto).toContain('gemini')
   })
 
+  it('media_start marca render_keyframes en tool (recursos-ancla §9.2)', () => {
+    const store = useExecutionStore.getState()
+    store.aplicarEvento(evento({ kind: 'media_start', escena: 1, proveedor: 'gemini' }))
+    expect(useExecutionStore.getState().estadoNodos.get('render_keyframes')?.estado)
+      .toBe('tool')
+  })
+
+  it('media_end marca render_keyframes done, con o sin error', () => {
+    const store = useExecutionStore.getState()
+    store.aplicarEvento(evento({
+      kind: 'media_end', escena: 1, proveedor: 'gemini', archivo: 'mi-show/ch-01/escena_1.png',
+    }))
+    expect(useExecutionStore.getState().estadoNodos.get('render_keyframes')?.estado)
+      .toBe('done')
+    // El media nunca tumba la corrida (§6): escena con error, nodo igual done.
+    store.aplicarEvento(evento({
+      kind: 'media_end', escena: 2, proveedor: 'gemini', error: 'proveedor caído',
+    }))
+    expect(useExecutionStore.getState().estadoNodos.get('render_keyframes')?.estado)
+      .toBe('done')
+  })
+
   it('media_end con archivo y QA aprobado compone el veredicto', () => {
     const store = useExecutionStore.getState()
     store.aplicarEvento(evento({

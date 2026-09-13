@@ -73,6 +73,7 @@ export type TipoNodo =
   | 'transformador'
   | 'revisor'
   | 'enriquecedor'
+  | 'media' // render_keyframes (recursos-ancla §9.2): solo con [media]
   | 'cierre'
 
 export type FaseId =
@@ -82,6 +83,7 @@ export type FaseId =
   | 'transformacion'
   | 'compuerta'
   | 'enriquecimiento'
+  | 'media'
   | 'cierre'
 
 export interface AgentNode {

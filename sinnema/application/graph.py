@@ -466,8 +466,6 @@ def build_pipeline_graph(
 
     # ----------------------------- GRAFO -----------------------------
 
-    flujo = resolver_flujo(project)
-
     def _agregar_agente(rol: str) -> str:
         """Registra el nodo del rol (nombre estable) y devuelve su nombre."""
         definicion = definiciones[rol]
@@ -482,8 +480,15 @@ def build_pipeline_graph(
 
     # Capa de media (§6): el nodo estructural solo participa con keyframes
     # activados Y dependencias inyectadas; en otro caso la topología (y el
-    # límite de recursión) es byte a byte la de siempre.
-    usar_media = media is not None and project.media.keyframes
+    # límite de recursión) es byte a byte la de siempre. Con ``hasta = "plan"``
+    # tampoco: la corrida termina sin episodios (no hay escenas que renderizar)
+    # y el nodo quedaría colgando de un commit que nunca se declara.
+    flujo = resolver_flujo(project)
+    usar_media = (
+        media is not None
+        and project.media.keyframes
+        and flujo.hasta != "plan"
+    )
     destino_commit = "commit_episode"
     if usar_media:
         workflow.add_node(

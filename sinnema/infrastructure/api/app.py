@@ -51,7 +51,11 @@ from fastapi.responses import (
 from pydantic import BaseModel, Field, ValidationError
 
 from sinnema.application.graph import build_pipeline_graph
-from sinnema.application.ports import ROLE_PLANNER, ROLE_SCRIPTWRITER
+from sinnema.application.ports import (
+    ROLE_PLANNER,
+    ROLE_SCRIPTWRITER,
+    DependenciasMedia,
+)
 from sinnema.application.projects import (
     CONTRATOS_VALIDOS,
     ROLES_ESENCIALES,
@@ -201,6 +205,18 @@ class _GatewayNulo:
         raise RuntimeError("El diagrama del grafo no ejecuta el pipeline.")
 
 
+class _MediaNulo:
+    """Puertos de media que nunca generan ni escriben: como el gateway nulo,
+    existen para que el nodo estructural ``render_keyframes`` (§9.2) entre en
+    la topología compilada cuando el proyecto activa ``[media].keyframes``.
+    El diagrama jamás ejecuta nodos."""
+
+    def generar_keyframe(self, *_a, **_k):  # pragma: no cover
+        raise RuntimeError("El diagrama del grafo no ejecuta el pipeline.")
+
+    guardar_keyframe = generar_keyframe
+
+
 # ---------------------------------------------------------------------------
 # Red efectiva (spec-red-3d §5.1): nodos + aristas del grafo compilado
 # ---------------------------------------------------------------------------
@@ -220,6 +236,27 @@ _CIERRE_DESCRIPCIONES = {
     ),
 }
 
+#: Nodo estructural de la capa de media (spec-recursos-ancla §6/§9.2): entra
+#: en la topología SOLO con ``[media].keyframes = true``.
+DESCRIPCION_RENDER_KEYFRAMES = (
+    "Genera el keyframe de cada escena con las anclas lockeadas citadas por "
+    "su spec visual y corre el QA visual (bucle acotado de regeneración §7)."
+)
+
+
+def _grafo_para_diagrama(proyecto: ProjectSpec):
+    """Grafo compilado SIN ejecutarlo (gateway y media nulos): la fuente única
+    de la topología para ``/red`` y para el Mermaid de ``/flujo-efectivo`` —
+    la escena 3D deriva SIEMPRE del grafo, jamás lo re-declara. Con ``[media].
+    keyframes = true`` el nodo ``render_keyframes`` participa (§9.2); sin
+    media, byte a byte el grafo de siempre (paridad)."""
+    media = (
+        DependenciasMedia(puerto=_MediaNulo(), almacen=_MediaNulo())
+        if proyecto.media.keyframes
+        else None
+    )
+    return build_pipeline_graph(_GatewayNulo(), proyecto, media=media)
+
 
 def _fases_del_flujo(proyecto: ProjectSpec, flujo: FlowSpec) -> Dict[str, str]:
     """Columna del layout (§9.1) por nodo, derivada del flujo efectivo."""
@@ -235,6 +272,8 @@ def _fases_del_flujo(proyecto: ProjectSpec, flujo: FlowSpec) -> Dict[str, str]:
     for rol in flujo.enriquecimiento:
         fases[definiciones[rol].nodo] = "enriquecimiento"
     fases.update({nodo: "cierre" for nodo in _CIERRE_DESCRIPCIONES})
+    if proyecto.media.keyframes:
+        fases["render_keyframes"] = "media"
     return fases
 
 
@@ -268,7 +307,7 @@ def _red_efectiva(proyecto: ProjectSpec) -> Dict[str, Any]:
     del grafo jamás se re-declara aquí ni en el cliente.
     """
     flujo = resolver_flujo(proyecto)
-    grafo = build_pipeline_graph(_GatewayNulo(), proyecto)
+    grafo = _grafo_para_diagrama(proyecto)
     dibujo = grafo.get_graph()
     definiciones = definiciones_del_proyecto(proyecto)
     nodo_a_rol = {d.nodo: rol for rol, d in definiciones.items()}
@@ -281,13 +320,17 @@ def _red_efectiva(proyecto: ProjectSpec) -> Dict[str, Any]:
             continue  # anclas discretas: solo aparecen como extremos de aristas
         rol = nodo_a_rol.get(nid)
         if rol is None:
+            es_media = nid == "render_keyframes"
             nodes.append({
                 "id": nid,
                 "rol": None,
-                "tipo": "cierre",
+                "tipo": "media" if es_media else "cierre",
                 "fase": fases[nid],
                 "estructural": True,
-                "descripcion": _CIERRE_DESCRIPCIONES[nid],
+                "descripcion": (
+                    DESCRIPCION_RENDER_KEYFRAMES if es_media
+                    else _CIERRE_DESCRIPCIONES[nid]
+                ),
                 "esencial": False,
                 "llm": None,
             })
@@ -494,7 +537,7 @@ def create_app(
         """
         proyecto = _proyecto_o_404(project_id)
         flujo = resolver_flujo(proyecto)
-        grafo = build_pipeline_graph(_GatewayNulo(), proyecto)
+        grafo = _grafo_para_diagrama(proyecto)
         customs = [
             {
                 "rol": rol,
@@ -528,7 +571,10 @@ def create_app(
 
         Nodos + aristas del grafo compilado con un gateway nulo (nunca genera
         contenido), anotados con el registro de agentes y el ``LLMConfig``
-        resuelto por rol. La derivación vive en ``_red_efectiva``.
+        resuelto por rol. La derivación vive en ``_grafo_para_diagrama``: con
+        ``[media].keyframes = true`` el nodo estructural ``render_keyframes``
+        entra en la topología (spec-recursos-ancla §9.2); sin media, exacta-
+        mente la red de siempre (paridad).
         """
         return _red_efectiva(_proyecto_o_404(project_id))
 
