@@ -37,6 +37,7 @@ export function PanelEstado({ nodoId }: Props) {
     (e) => e.kind === 'tool_start' || e.kind === 'tool_end',
   )
   const clavesPorPaso = log.filter((e) => e.kind === 'node_end')
+  const mediaPorEscena = log.filter((e) => e.kind === 'media_end')
 
   const abrir = async (n: number): Promise<void> => {
     if (jobId === null) return
@@ -71,6 +72,35 @@ export function PanelEstado({ nodoId }: Props) {
                 <span className="text-texto">{e.node}</span>: {e.texto.split('claves: ')[1] ?? ''}
               </li>
             ))}
+          </ul>
+        )}
+      </section>
+
+      <section>
+        <h4 className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-texto-suave">
+          Media y QA por escena
+        </h4>
+        {mediaPorEscena.length === 0 ? (
+          <p className="text-[10px] text-texto-suave">
+            — sin generaciones de media en este job —
+          </p>
+        ) : (
+          <ul className="space-y-0.5 font-mono text-[10px]">
+            {mediaPorEscena.slice(-12).map((e) => {
+              // Verde = QA aprobado; ámbar = entregado sin aprobación; rojo = sin media.
+              const fallo = e.texto.startsWith('✖')
+              const aprobado = e.texto.includes('QA aprobado')
+              const color = fallo
+                ? 'text-red-400'
+                : aprobado
+                  ? 'text-emerald-400'
+                  : 'text-amber-300'
+              return (
+                <li key={e.id} className={color}>
+                  {e.texto}
+                </li>
+              )
+            })}
           </ul>
         )}
       </section>

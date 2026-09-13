@@ -6,15 +6,21 @@ adaptador concreto. Así el grafo se puede testear con dobles en memoria.
 """
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Final, Optional, Protocol, Sequence, Type, TypeVar
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Final, List, Optional, Protocol, Sequence, Tuple, Type, TypeVar
 
 from pydantic import BaseModel
 
 from sinnema.domain.models import (
     AdaptedScript,
     ContinuityDirectives,
+    InformeQaVisual,
     LoreEntry,
+    MediaCrudo,
+    PedidoKeyframe,
     QualityAudit,
+    RecursoAncla,
+    ReferenciaAncla,
     ScriptDraft,
     SeriesPlan,
     TechnicalPackage,
@@ -126,6 +132,34 @@ class NullLoreStore:
         return None
 
 
+class AnchorStorePort(Protocol):
+    """Puerto de la biblioteca de recursos ancla de cada proyecto.
+
+    La biblioteca (spec-recursos-ancla §4.2) vive ANTES de cada corrida: la
+    siembra y lockea una persona desde la web, y el pipeline solo la lee.
+    Cómo y dónde se guarda es cosa del adaptador (p. ej. un JSON + carpeta
+    de media por proyecto).
+    """
+
+    def load(self, project_id: str) -> List[RecursoAncla]:
+        """Devuelve las anclas del proyecto (vacío si no hay biblioteca)."""
+        ...
+
+    def save(self, project_id: str, anclas: List[RecursoAncla]) -> None:
+        """Reemplaza la biblioteca almacenada del proyecto por ``anclas``."""
+        ...
+
+
+class NullAnchorStore:
+    """Implementación no-op: cada corrida ve una biblioteca vacía y no persiste."""
+
+    def load(self, project_id: str) -> List[RecursoAncla]:
+        return []
+
+    def save(self, project_id: str, anclas: List[RecursoAncla]) -> None:
+        return None
+
+
 #: Evento de generación en vivo (spec-red-3d §7.1): ``{"tipo": "token"|"tool_start"|
 #: "tool_end", ...}``. ``token`` lleva ``texto``; ``tool_start`` lleva ``tool`` y
 #: ``args``; ``tool_end`` lleva ``tool`` y ``resumen``.
@@ -133,6 +167,101 @@ EventoGeneracion = Dict[str, Any]
 
 #: Callback opcional de streaming que consume el adaptador por cada evento.
 EventCallback = Callable[[EventoGeneracion], None]
+
+
+class MediaGenerationPort(Protocol):
+    """Puerto de generación de media (spec-recursos-ancla §6).
+
+    El nodo estructural ``render_keyframes`` compone un ``PedidoKeyframe`` por
+    escena y lo entrega aquí; el adaptador concreto (Gemini image, OpenAI
+    gpt-image-1, ...) traduce las referencias al payload nativo vía su
+    resolver, reintenta fallos de transporte y devuelve los bytes crudos con
+    su manifest de procedencia. NUNCA escribe archivos: persistir es política
+    de la aplicación (nodo + ``MediaStorePort``).
+
+    Degradación elegante (mismo espíritu que los proveedores LLM): el
+    adaptador se construye sin claves ni SDK instalado; usarlo lanza un
+    ``RuntimeError`` con instrucciones accionables.
+    """
+
+    def generar_keyframe(
+        self,
+        pedido: PedidoKeyframe,
+        catalogo: Sequence[RecursoAncla],
+    ) -> MediaCrudo:
+        """Genera el keyframe de la escena del pedido.
+
+        ``catalogo`` es la biblioteca lockeada del proyecto (el slot
+        ``anclas`` del estado): el resolver del adaptador resuelve cada
+        ``ancla_id`` contra él y verifica los máximos del proveedor ANTES de
+        la llamada (excederlos es un error de wiring local, ``ValueError`` —
+        §11.3 —, no un fallo remoto).
+        """
+        ...
+
+
+class MediaStorePort(Protocol):
+    """Puerto de persistencia del media generado por el pipeline.
+
+    El nodo ``render_keyframes`` le entrega los bytes que devolvió el puerto
+    de generación; cómo y dónde se guardan es cosa del adaptador (p. ej.
+    ``media/<project_id>/<chapter_id>/escena_<n>.<ext>`` bajo la raíz de
+    datos). Devuelve la ruta relativa (portable) que viaja en
+    ``MediaGenerado.archivo``.
+    """
+
+    def guardar_keyframe(
+        self,
+        project_id: str,
+        chapter_id: str,
+        escena: int,
+        formato: str,
+        datos: bytes,
+    ) -> str:
+        """Escribe el keyframe y devuelve su ruta relativa bajo la raíz de media."""
+        ...
+
+
+class QaVisualPort(Protocol):
+    """Puerto de QA visual (spec-recursos-ancla §7): compara un keyframe contra
+    la biblioteca lockeada. La aplicación solo conoce el contrato; las métricas
+    pesadas (ArcFace/DINOv2/CLIP/pHash) son del adaptador de infraestructura
+    (extra opcional ``sinnema[qa]``, degradación elegante si falta).
+    """
+
+    def evaluar_keyframe(
+        self,
+        *,
+        escena: int,
+        project_id: str,
+        prompt: str,
+        datos_keyframe: bytes,
+        pares: Sequence[Tuple[ReferenciaAncla, RecursoAncla]],
+        previos: Sequence[Tuple[int, bytes]] = (),
+    ) -> Tuple[List[InformeQaVisual], List[str]]:
+        """Devuelve ``(informes, avisos)``: veredictos validados + métricas omitidas."""
+        ...
+
+
+@dataclass(frozen=True)
+class DependenciasMedia:
+    """Paquete de media inyectable en el grafo (opcional, spec §6/Hito 3).
+
+    ``None`` en el use case/grafo = corrida sin capa de media (nodo
+    ``render_keyframes`` ni se inserta: paridad con el pipeline de siempre).
+    ``eventos`` es el canal en vivo de progreso: el nodo emite
+    ``{"tipo": "media_start"|"media_end", "escena": n, "proveedor": ...}`` y
+    el runner lo traduce a los eventos del job que llegan a SSE. ``proveedor``
+    es el nombre del adaptador ("gemini"/"openai"): puramente informativo
+    (eventos y auditoría). ``qa`` (opcional, Fase 4) es el servicio de QA
+    visual: presente, el nodo ejecuta el bucle acotado de regeneración §7.
+    """
+
+    puerto: MediaGenerationPort
+    almacen: MediaStorePort
+    eventos: Optional[Callable[[Dict[str, Any]], None]] = None
+    proveedor: str = ""
+    qa: Optional[QaVisualPort] = None
 
 
 class StructuredGenerationPort(Protocol):

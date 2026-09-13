@@ -107,3 +107,64 @@ describe('executionStore', () => {
     expect(log[0]!.texto).toContain('Paso 1')
   })
 })
+
+describe('eventos de media (recursos-ancla Fase 4)', () => {
+  beforeEach(() => {
+    useExecutionStore.getState().reset()
+  })
+
+  it('media_start deja una entrada de progreso por escena', () => {
+    const store = useExecutionStore.getState()
+    store.aplicarEvento(evento({ kind: 'media_start', escena: 3, proveedor: 'gemini' }))
+    const log = useExecutionStore.getState().log
+    expect(log).toHaveLength(1)
+    expect(log[0].kind).toBe('media_start')
+    expect(log[0].texto).toContain('escena 3')
+    expect(log[0].texto).toContain('gemini')
+  })
+
+  it('media_start marca render_keyframes en tool (recursos-ancla §9.2)', () => {
+    const store = useExecutionStore.getState()
+    store.aplicarEvento(evento({ kind: 'media_start', escena: 1, proveedor: 'gemini' }))
+    expect(useExecutionStore.getState().estadoNodos.get('render_keyframes')?.estado)
+      .toBe('tool')
+  })
+
+  it('media_end marca render_keyframes done, con o sin error', () => {
+    const store = useExecutionStore.getState()
+    store.aplicarEvento(evento({
+      kind: 'media_end', escena: 1, proveedor: 'gemini', archivo: 'mi-show/ch-01/escena_1.png',
+    }))
+    expect(useExecutionStore.getState().estadoNodos.get('render_keyframes')?.estado)
+      .toBe('done')
+    // El media nunca tumba la corrida (§6): escena con error, nodo igual done.
+    store.aplicarEvento(evento({
+      kind: 'media_end', escena: 2, proveedor: 'gemini', error: 'proveedor caído',
+    }))
+    expect(useExecutionStore.getState().estadoNodos.get('render_keyframes')?.estado)
+      .toBe('done')
+  })
+
+  it('media_end con archivo y QA aprobado compone el veredicto', () => {
+    const store = useExecutionStore.getState()
+    store.aplicarEvento(evento({
+      kind: 'media_end', escena: 1, proveedor: 'gemini',
+      archivo: 'mi-show/ch-01/escena_1.png', qa: 'aprobado', intentos: 2,
+    }))
+    const log = useExecutionStore.getState().log
+    expect(log[0].kind).toBe('media_end')
+    expect(log[0].texto).toContain('escena_1.png')
+    expect(log[0].texto).toContain('QA aprobado')
+    expect(log[0].texto).toContain('2 intento/s')
+  })
+
+  it('media_end con error marca la escena sin media', () => {
+    const store = useExecutionStore.getState()
+    store.aplicarEvento(evento({
+      kind: 'media_end', escena: 2, proveedor: 'gemini', error: 'proveedor caído',
+    }))
+    const log = useExecutionStore.getState().log
+    expect(log[0].texto).toContain('sin keyframe')
+    expect(log[0].texto).toContain('proveedor caído')
+  })
+})

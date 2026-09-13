@@ -17,6 +17,7 @@ from sinnema.domain.models import (
     FailedChapterRecord,
     LoreEntry,
     QualityAudit,
+    RecursoAncla,
     ScriptDraft,
     SeriesPlan,
     TechnicalPackage,
@@ -72,6 +73,12 @@ class PipelineState(TypedDict, total=False):
     #    (reducer append-only: los nodos nunca sobrescriben el lore)
     # ------------------------------------------------------------------
     lore_entries: Annotated[List[LoreEntry], operator.add]
+    #: Biblioteca de recursos ancla lockeados del proyecto (spec-recursos-ancla
+    #: §5.1): catálogo FIJO sembrado al inicio de la corrida (igual semántica
+    #: que la siembra del lore, pero sin reducer: nadie lo amplía durante la
+    #: corrida). ``commit_episode`` es el único que lo re-escribe, para estampar
+    #: la vigencia (chapter_first_seen/last_seen) de las anclas usadas.
+    anclas: List[RecursoAncla]
 
     # ------------------------------------------------------------------
     # d) ITERATION & RUNTIME STATE: punteros, reintentos y borradores

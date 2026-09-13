@@ -19,6 +19,7 @@ el nodo aplica sobre el artefacto generado ANTES de que circule por el estado.
 """
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
 from typing import (
     Any,
@@ -59,6 +60,7 @@ from sinnema.domain.models import (
     ContinuityDirectives,
     NotasDelAgente,
     QualityAudit,
+    RecursoAncla,
     ScriptDraft,
     SeriesPlan,
     TechnicalPackage,
@@ -68,7 +70,9 @@ from sinnema.domain.services import (
     identity_adaptation,
     validate_adaptation_format,
     validate_adaptation_matches_draft,
+    validate_anchor_refs,
     validate_audit_verdict,
+    validate_continuity_anchors,
     validate_draft_format,
     validate_package_format,
     validate_package_matches_draft,
@@ -165,6 +169,7 @@ def _mensaje_continuity(project: ProjectSpec, state: PipelineState) -> str:
         previous_chapter=previo,
         lore_entries=state.get("lore_entries", []),
         recurring_elements=plan.recurring_elements,
+        anclas=state.get("anclas") or [],
     )
 
 
@@ -213,12 +218,15 @@ def _mensaje_director(project: ProjectSpec, state: PipelineState) -> str:
         # Flujo sin transformaciones aguas arriba: el director traduce el
         # borrador con adaptación identidad (determinista, sin LLM).
         adaptado = identity_adaptation(state["draft_script"])
+    directivas = state.get("continuity_directives")
     return director_prompts.build_user_message(
         project,
         chapter=capitulo,
         draft=state["draft_script"],
         adapted=adaptado,
         recurring_elements=plan.recurring_elements,
+        anclas=state.get("anclas") or [],
+        casting=directivas.anclas_del_capitulo if directivas else [],
     )
 
 
@@ -379,7 +387,12 @@ AGENT_REGISTRY: Dict[str, AgentDefinition] = {
         nodo="continuity_master",
         produce="continuity_directives",
         mensaje=_mensaje_continuity,
-        consume=("series_plan", "current_chapter_index", "lore_entries"),
+        consume=("series_plan", "current_chapter_index", "lore_entries", "anclas"),
+        validadores=(
+            lambda directivas, project, state: validate_continuity_anchors(
+                directivas, state.get("anclas") or []
+            ),
+        ),
         al_desactivar=_desactivar_continuity,
         resumen_desactivado=_resumen_desactivar_continuity,
         resumen=_resumen_continuity,
@@ -458,11 +471,17 @@ AGENT_REGISTRY: Dict[str, AgentDefinition] = {
         mensaje=_mensaje_director,
         consume=(
             "series_plan", "current_chapter_index",
-            "draft_script", "adapted_script",
+            "draft_script", "adapted_script", "continuity_directives", "anclas",
         ),
-        validadores=(_validar_paquete_coherente,
-                     lambda art, project, state: validate_package_format(
-                         art, project.format)),
+        validadores=(
+            _validar_paquete_coherente,
+            lambda art, project, state: validate_package_format(
+                art, project.format
+            ),
+            lambda paquete, project, state: validate_anchor_refs(
+                paquete, state.get("anclas") or []
+            ),
+        ),
         al_desactivar=_desactivar_director,
         resumen_desactivado=_resumen_desactivar_director,
         resumen=_resumen_director,
@@ -528,16 +547,35 @@ def _con_reglas(prompt_base: str, config: AgentConfig) -> str:
     )
 
 
-def build_role_system_prompts(spec: ProjectSpec) -> Dict[str, str]:
+def _prompt_base_con_anclas(prompts: PromptModule, spec: ProjectSpec, anclas) -> str:
+    """System prompt del rol; los módulos que lo soportan reciben la biblioteca.
+
+    Solo continuity y director componen su prompt con el catálogo lockeado
+    (spec-recursos-ancla §5.1/§5.3); el resto de módulos (y los customs) lo
+    ignoran y conservan su prompt byte a byte.
+    """
+    acepta = "anclas" in inspect.signature(prompts.build_system_prompt).parameters
+    if anclas and acepta:
+        return prompts.build_system_prompt(spec, anclas=anclas)
+    return prompts.build_system_prompt(spec)
+
+
+def build_role_system_prompts(
+    spec: ProjectSpec, anclas: Optional[List[RecursoAncla]] = None
+) -> Dict[str, str]:
     """System prompt de cada rol para un proyecto, indexado por rol.
 
     Cada prompt base del rol se compone con el ``ProjectSpec`` y luego recibe
     las ``reglas`` declaradas en ``[agentes.<rol>]`` del proyecto, si las hay.
     Incluye los agentes custom del proyecto (definidos 100% en el TOML).
+    ``anclas`` es el catálogo lockeado sembrado en la corrida: presente, los
+    roles con conciencia visual (continuity, director) componen sus reglas de
+    identidad fija; ausente o vacío, los prompts son EXACTAMENTE los de
+    siempre.
     """
     prompts: Dict[str, str] = {}
     for rol, definicion_rol in {**AGENT_REGISTRY, **definiciones_custom(spec)}.items():
-        base = definicion_rol.prompts.build_system_prompt(spec)
+        base = _prompt_base_con_anclas(definicion_rol.prompts, spec, anclas)
         prompts[rol] = _con_reglas(base, spec.config_de_agente(rol))
     return prompts
 

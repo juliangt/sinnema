@@ -17,6 +17,42 @@ export interface Catalogos {
   tipos_custom: ('contexto' | 'revisor' | 'enriquecedor')[]
   contratos: ('notas' | 'texto' | 'dictamen')[]
   entradas_custom: string[] // CATALOGO_ENTRADAS
+  anclas: CatalogosAnclas // vocabulario de la biblioteca de anclas
+}
+
+// ── Anclas: biblioteca visual (spec-recursos-ancla §4.1/§9.1) ─────────────
+export type TipoDeAncla = 'personaje' | 'lugar' | 'objeto' | 'estilo'
+export type EstadoDeAncla = 'borrador' | 'propuesto' | 'lockeado' | 'retirado'
+
+/** Catálogos de anclas (GET /api/meta/catalogos → `anclas`). */
+export interface CatalogosAnclas {
+  tipos: TipoDeAncla[]
+  estados: EstadoDeAncla[]
+  roles_por_tipo: Record<TipoDeAncla, string[]>
+  bateria_minima: Record<TipoDeAncla, string[]>
+}
+
+/** Una imagen de la batería de un ancla. */
+export interface ImagenAncla {
+  rol: string // RolDeImagen (vocabulario en roles_por_tipo)
+  archivo: string // nombre plano generado por el servidor (<rol>_<n>.<ext>)
+  origen: 'subida' | 'generada'
+  manifest?: Record<string, unknown> | null // solo origen 'generada'
+}
+
+/** Una entidad visual ancla del proyecto (GET .../anclas). */
+export interface Ancla {
+  ancla_id: string
+  tipo: TipoDeAncla
+  nombre: string
+  descripcion_canonica: string // EN inglés (≥40 chars), texto para modelos de imagen
+  estado: EstadoDeAncla
+  bateria: ImagenAncla[]
+  version: number
+  chapter_first_seen?: string | null
+  chapter_last_seen?: string | null
+  qa_medio?: number | null // QA medio del media entregado (Fase 4); null = sin muestras
+  qa_muestras?: number
 }
 
 // ── Config LLM por agente ([agentes.<rol>] resuelto: proyecto > default) ──
@@ -37,6 +73,7 @@ export type TipoNodo =
   | 'transformador'
   | 'revisor'
   | 'enriquecedor'
+  | 'media' // render_keyframes (recursos-ancla §9.2): solo con [media]
   | 'cierre'
 
 export type FaseId =
@@ -46,6 +83,7 @@ export type FaseId =
   | 'transformacion'
   | 'compuerta'
   | 'enriquecimiento'
+  | 'media'
   | 'cierre'
 
 export interface AgentNode {
@@ -162,6 +200,24 @@ export type RuntimeExecutionEvent =
       args: unknown
     }
   | { kind: 'tool_end'; ts: string; job_id: string; node: string; rol: string; tool: string; resumen: string }
+  | {
+      kind: 'media_start'
+      ts: string
+      job_id: string
+      escena: number
+      proveedor: string
+    }
+  | {
+      kind: 'media_end'
+      ts: string
+      job_id: string
+      escena: number
+      proveedor: string
+      archivo?: string
+      error?: string
+      qa?: string // 'aprobado' | 'agotado' (QA visual, Fase 4)
+      intentos?: number
+    }
   | { kind: 'progress' | 'error' | 'done'; ts: string; job_id: string; mensaje: string }
 
 // ── Auditoría (GET /api/jobs/{id}/artifacts[/{n}]) ────────────────────────

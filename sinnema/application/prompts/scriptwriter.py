@@ -66,6 +66,18 @@ def build_user_message(
         else ""
     )
     if directives is not None:
+        bloque_casting = (
+            "\n"
+            "  casting_del_capitulo (apariencia FIJA: usa el nombre canónico;\n"
+            "  NO re-describas a estos personajes/lugares con rasgos nuevos):\n"
+            + "\n".join(
+                f"    - {cita.ancla_id} [{cita.tipo}]: {cita.instrucciones} "
+                f"(descriptor visual: {cita.descriptor})"
+                for cita in directives.anclas_del_capitulo
+            )
+            if directives.anclas_del_capitulo
+            else ""
+        )
         bloque_directivas = (
             "<directivas_de_continuidad>\n"
             f"  recap_bridge: {directives.recap_bridge}\n"
@@ -75,7 +87,8 @@ def build_user_message(
             f"  terminos_nuevos_a_introducir: {', '.join(directives.new_terms_to_introduce)}\n"
             f"  prohibido_reexplicar: "
             f"{', '.join(directives.forbidden_reexplanations) or '(nada adicional)'}\n"
-            f"  notas: {directives.continuity_notes}\n"
+            f"  notas: {directives.continuity_notes}"
+            f"{bloque_casting}\n"
             "</directivas_de_continuidad>\n"
         )
     else:

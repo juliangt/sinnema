@@ -21,7 +21,7 @@ from sinnema.application.projects import ProjectSpec, project_from_dict
 
 #: Secciones válidas de un archivo de proyecto (también a nivel raíz).
 SECCIONES_VALIDAS = frozenset(
-    {"proyecto", "voz", "visual", "formato", "agentes", "pipeline", "flujo"}
+    {"proyecto", "voz", "visual", "formato", "agentes", "pipeline", "flujo", "media"}
 )
 
 

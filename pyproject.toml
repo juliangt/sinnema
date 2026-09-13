@@ -23,12 +23,24 @@ dependencies = [
     "langgraph-checkpoint-sqlite>=2.0.0",
     "python-dotenv>=1.0.0",
     "tomli-w>=1.0,<2.0",
+    "python-multipart>=0.0.32",
 ]
 
 [project.optional-dependencies]
 server = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
+]
+media = [
+    "google-genai>=1.0",
+    "openai>=1.50",
+]
+qa = [
+    "insightface>=0.7",
+    "onnxruntime>=1.17",
+    "timm>=1.0",
+    "open_clip_torch>=2.24",
+    "ImageHash>=4.3",
 ]
 dev = [
     "pytest>=8.0",

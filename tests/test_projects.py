@@ -301,6 +301,40 @@ def test_spec_validate_rechaza_rol_esencial_desactivado_por_construccion_directa
         ).validate()
 
 
+# ----------------------- [visual] anclas (spec-recursos-ancla §4.3) -----------------------
+
+
+def test_from_dict_sin_anclas_participa_por_defecto():
+    proyecto = project_from_dict(_toml_minimo())
+    assert proyecto.anclas is True
+
+
+def test_from_dict_con_optout_anclas_false():
+    datos = _toml_minimo()
+    datos["visual"]["anclas"] = False
+    proyecto = project_from_dict(datos)
+    assert proyecto.anclas is False
+    proyecto.validate()  # el opt-out sigue siendo un proyecto válido
+
+
+def test_from_dict_con_anclas_true_explícito():
+    datos = _toml_minimo()
+    datos["visual"]["anclas"] = True
+    assert project_from_dict(datos).anclas is True
+
+
+def test_from_dict_rechaza_anclas_no_booleano():
+    datos = _toml_minimo()
+    datos["visual"]["anclas"] = "no"
+    with pytest.raises(ValueError, match="'anclas' en \\[visual\\] debe ser booleano"):
+        project_from_dict(datos)
+
+
+def test_spec_directo_con_anclas_no_booleano_rechazado():
+    with pytest.raises(ValueError, match="anclas"):
+        make_project(anclas="no").validate()
+
+
 # --------------------------------- Loader ---------------------------------
 
 

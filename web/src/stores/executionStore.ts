@@ -162,6 +162,33 @@ export const useExecutionStore = create<EstadoEjecucion>()((set, get) => ({
           })
           break
         }
+        case 'media_start': {
+          // Media (recursos-ancla §6/§9.2): el nodo estructural entra en
+          // 'tool' (halo ámbar, como una tool corriendo) mientras genera
+          // keyframes; el progreso por escena llega al timeline igual que
+          // los tokens de los agentes.
+          marcarNodo(estado, 'render_keyframes', 'tool')
+          empujarLog(set, estado, {
+            id: ++secuenciaLog, ts: ev.ts, kind: 'media_start',
+            texto: `🎬 render_keyframes: escena ${ev.escena} (${ev.proveedor})…`,
+            node: 'render_keyframes',
+          })
+          break
+        }
+        case 'media_end': {
+          // El nodo termina aunque la escena falle (§6: el media nunca tumba
+          // la corrida): el estado visual del nodo es 'done' igual.
+          marcarNodo(estado, 'render_keyframes', 'done')
+          const texto = ev.error !== undefined
+            ? `✖ escena ${ev.escena} queda sin keyframe: ${ev.error}`
+            : `✔ keyframe escena ${ev.escena}: ${ev.archivo ?? ''}` +
+              (ev.qa !== undefined ? ` · QA ${ev.qa} (${ev.intentos ?? 1} intento/s)` : '')
+          empujarLog(set, estado, {
+            id: ++secuenciaLog, ts: ev.ts, kind: 'media_end',
+            texto, node: 'render_keyframes',
+          })
+          break
+        }
         case 'error': {
           // El job falló: los nodos en vuelo pasan a error (parpadeo 5 s).
           for (const marca of estado.estadoNodos.values()) {

@@ -1,4 +1,12 @@
-import type { Artifact, Catalogos, EffectiveNetwork, Job, ProjectDetail, ProjectSummary } from '../types'
+import type {
+  Ancla,
+  Artifact,
+  Catalogos,
+  EffectiveNetwork,
+  Job,
+  ProjectDetail,
+  ProjectSummary,
+} from '../types'
 
 /** Error de API con el status HTTP (distingue 404/400 de fallos de red). */
 export class ApiError extends Error {
@@ -12,9 +20,14 @@ export class ApiError extends Error {
 }
 
 async function pedir<T>(ruta: string, init?: RequestInit): Promise<T> {
+  // Con FormData el Content-Type lo fija el navegador (boundary del multipart):
+  // el default JSON se omite para no romperlo.
+  const esFormData = typeof FormData !== 'undefined' && init?.body instanceof FormData
   const respuesta = await fetch(ruta, {
     ...init,
-    headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
+    headers: esFormData
+      ? init?.headers
+      : { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
   })
   if (!respuesta.ok) {
     let detalle = `${respuesta.status} ${respuesta.statusText}`
@@ -82,6 +95,69 @@ export const api = {
   /** DELETE /api/projects/{id}/lore — reinicia la memoria de continuidad. */
   reiniciarLore(id: string): Promise<void> {
     return pedir(`/api/projects/${encodeURIComponent(id)}/lore`, { method: 'DELETE' })
+  },
+
+  // ─────────────── Anclas: biblioteca visual (§9.1) ───────────────
+
+  /** GET /api/projects/{id}/anclas — biblioteca completa del proyecto. */
+  anclas(id: string): Promise<Ancla[]> {
+    return pedir(`/api/projects/${encodeURIComponent(id)}/anclas`)
+  },
+
+  /** POST /api/projects/{id}/anclas — alta en borrador (409 si duplica). */
+  crearAncla(
+    id: string,
+    cuerpo: { ancla_id: string; tipo: string; nombre: string; descripcion_canonica: string },
+  ): Promise<Ancla> {
+    return pedir(`/api/projects/${encodeURIComponent(id)}/anclas`, {
+      method: 'POST',
+      body: JSON.stringify(cuerpo),
+    })
+  },
+
+  /** PUT /api/projects/{id}/anclas/{a} — edita nombre y descripcion_canonica. */
+  editarAncla(
+    id: string,
+    anclaId: string,
+    cuerpo: { nombre?: string; descripcion_canonica?: string },
+  ): Promise<Ancla> {
+    return pedir(
+      `/api/projects/${encodeURIComponent(id)}/anclas/${encodeURIComponent(anclaId)}`,
+      { method: 'PUT', body: JSON.stringify(cuerpo) },
+    )
+  },
+
+  /** DELETE /api/projects/{id}/anclas/{a} — retiro: no borra nada, el
+   * registro queda en estado 'retirado'. */
+  retirarAncla(
+    id: string,
+    anclaId: string,
+  ): Promise<{ project_id: string; ancla_id: string; estado: string; retirado: boolean }> {
+    return pedir(
+      `/api/projects/${encodeURIComponent(id)}/anclas/${encodeURIComponent(anclaId)}`,
+      { method: 'DELETE' },
+    )
+  },
+
+  /** POST .../anclas/{a}/imagenes — upload multipart a la batería; devuelve
+   * el ancla actualizada (con la ImagenAncla nueva). */
+  subirImagen(id: string, anclaId: string, rol: string, archivo: File): Promise<Ancla> {
+    const datos = new FormData()
+    datos.append('rol', rol)
+    datos.append('archivo', archivo)
+    return pedir(
+      `/api/projects/${encodeURIComponent(id)}/anclas/${encodeURIComponent(anclaId)}/imagenes`,
+      { method: 'POST', body: datos },
+    )
+  },
+
+  /** POST .../anclas/{a}/lock — lock humano (400 con los roles faltantes si
+   * la batería mínima no alcanza). */
+  lockearAncla(id: string, anclaId: string): Promise<Ancla> {
+    return pedir(
+      `/api/projects/${encodeURIComponent(id)}/anclas/${encodeURIComponent(anclaId)}/lock`,
+      { method: 'POST' },
+    )
   },
 
   // ─────────────────────── Jobs y ejecución (§5) ───────────────────────

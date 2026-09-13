@@ -68,6 +68,11 @@ TEMPERATURA_MAX = 2.0
 TOP_P_MIN = 0.0
 TOP_P_MAX = 1.0
 
+#: Proveedores de imagen válidos para ``[media].proveedor_imagen`` (spec §4.3).
+#: El default (sin clave en el TOML) lo resuelve el entorno (MEDIA_PROVIDER).
+PROVEEDORES_DE_IMAGEN = ("gemini", "openai")
+INTENTOS_QA_MAX = 5
+
 # --- Agentes custom (declarados 100% en el TOML; spec-agentes-dinamicos §8) ----
 #: Tipos permitidos para un agente custom: la compuerta (revisor) y las fases
 #: periféricas. ``escritor``/``transformador`` exigen contratos de guion
@@ -258,6 +263,37 @@ class PipelineConfig:
             raise ValueError(
                 "politica_al_agotar debe ser 'aceptar_forzado' o 'saltar_capitulo' "
                 f"(recibido: '{self.politica_al_agotar}')."
+            )
+
+
+@dataclass(frozen=True)
+class MediaConfig:
+    """Política de la capa de media declarada por el proyecto (sección [media],
+    spec-recursos-ancla §4.3). TODO OPCIONAL: sin sección, todo default-off y
+    la corrida es idéntica a la de siempre (paridad §1).
+
+    ``proveedor_imagen`` ``None`` = sin preferencia: rige el entorno
+    (``MEDIA_PROVIDER``, default ``gemini``). ``intentos_qa`` lo consume la
+    Fase 4 (bucle de regeneración ante QA fallido); aquí solo se parsea.
+    """
+
+    keyframes: bool = False
+    video: bool = False
+    encadenar_frames: bool = True
+    proveedor_imagen: Optional[str] = None
+    intentos_qa: int = 1
+
+    def __post_init__(self) -> None:
+        if self.proveedor_imagen is not None and self.proveedor_imagen not in PROVEEDORES_DE_IMAGEN:
+            validos = ", ".join(PROVEEDORES_DE_IMAGEN)
+            raise ValueError(
+                f"proveedor_imagen debe ser uno de: {validos} "
+                f"(recibido: '{self.proveedor_imagen}')."
+            )
+        if not 0 <= self.intentos_qa <= INTENTOS_QA_MAX:
+            raise ValueError(
+                f"intentos_qa debe estar entre 0 y {INTENTOS_QA_MAX} "
+                f"(recibido: {self.intentos_qa})."
             )
 
 
@@ -520,6 +556,17 @@ class ProjectSpec:
     #: ``resolver_flujo`` aplica la semántica legacy (los 6 roles menos los
     #: ``activo = false``, que conservan su cortocircuito).
     flujo: Optional[FlowSpec] = None
+    #: Participación de la biblioteca de recursos ancla (clave ``anclas`` de
+    #: ``[visual]``, spec-recursos-ancla §4.3): ``false`` la ignora por
+    #: completo; default ``true`` (participación automática si hay lockeadas).
+    anclas: bool = True
+    #: ``ancla_estilo`` de ``[visual]`` (§4.3): ancla de estilo aplicada a TODO
+    #: render — su ``style_reference`` entra en el pedido de cada escena aunque
+    #: el director no la haya declarado. ``None`` = sin ancla de estilo global.
+    ancla_estilo: Optional[str] = None
+    #: Política de la capa de media (sección opcional ``[media]``, §4.3/§6):
+    #: sin sección, todo default-off y la corrida es la de siempre.
+    media: MediaConfig = field(default_factory=MediaConfig)
 
     def config_de_agente(self, rol: str) -> AgentConfig:
         """Config del rol para este proyecto (vacía si no se declaró nada)."""
@@ -574,6 +621,12 @@ class ProjectSpec:
             problemas.append(
                 "El campo 'visual_master_style' debe describir el estilo visual "
                 f"maestro en inglés (mínimo {_VISUAL_MASTER_STYLE_MIN_CHARS} caracteres)."
+            )
+
+        if not isinstance(self.anclas, bool):
+            problemas.append(
+                "'anclas' en [visual] debe ser booleano (true por defecto; "
+                f"recibido: '{self.anclas}')."
             )
 
         for rol in sorted(ROLES_ESENCIALES & set(self.agentes)):
@@ -826,8 +879,51 @@ _CLAVES_PIPELINE = frozenset({"intentos_maximos_de_critica", "politica_al_agotar
 _CLAVES_FLUJO = frozenset(
     {"contexto", "transformaciones", "revisor", "enriquecimiento", "hasta"}
 )
+_CLAVES_MEDIA = frozenset(
+    {"keyframes", "video", "encadenar_frames", "proveedor_imagen", "intentos_qa"}
+)
 
 
+
+
+def _anclas_habilitadas(datos: Dict[str, Any], problemas: List[str]) -> bool:
+    """Parsea la clave opcional ``anclas`` de ``[visual]`` (default ``true``).
+
+    Opt-out de la biblioteca de recursos ancla (spec-recursos-ancla §4.3): sin
+    la clave (o sin sección ``[visual]``) el proyecto participa; ``false`` la
+    ignora por completo.
+    """
+    visual = datos.get("visual")
+    if not isinstance(visual, dict) or "anclas" not in visual:
+        return True
+    valor = visual["anclas"]
+    if not isinstance(valor, bool):
+        problemas.append(
+            "'anclas' en [visual] debe ser booleano "
+            f"(true por defecto; recibido: '{valor}')."
+        )
+        return True
+    return valor
+
+
+def _ancla_estilo(datos: Dict[str, Any], problemas: List[str]) -> Optional[str]:
+    """Parsea la clave opcional ``ancla_estilo`` de ``[visual]`` (§4.3).
+
+    Ancla de estilo aplicada a TODO render: su ``style_reference`` entra en el
+    pedido de cada escena (la inyección la hace el nodo de media si el ancla
+    existe y está lockeada). ``None`` = sin ancla de estilo global.
+    """
+    visual = datos.get("visual")
+    if not isinstance(visual, dict) or "ancla_estilo" not in visual:
+        return None
+    valor = visual["ancla_estilo"]
+    if not isinstance(valor, str) or not valor.strip():
+        problemas.append(
+            "'ancla_estilo' en [visual] debe ser el ancla_id de un ancla de "
+            f"tipo 'estilo' (recibido: '{valor}')."
+        )
+        return None
+    return valor.strip()
 
 
 def _mapear_pipeline(datos: Dict[str, Any], problemas: List[str]) -> PipelineConfig:
@@ -931,6 +1027,76 @@ def _mapear_flujo(datos: Dict[str, Any], problemas: List[str]) -> Optional[FlowS
     )
 
 
+def _mapear_media(datos: Dict[str, Any], problemas: List[str]) -> MediaConfig:
+    """Parsea la sección opcional ``[media]`` (spec-recursos-ancla §4.3).
+
+    Sin sección (o sin la tabla) devuelve ``MediaConfig()``: todo default-off,
+    corrida idéntica a la de siempre. ``video = true`` es hoy un error de
+    configuración claro: la generación I2V pertenece a una fase posterior
+    (§13) y no se acepta en silencio.
+    """
+    crudo = datos.get("media")
+    if crudo is None:
+        return MediaConfig()
+    if not isinstance(crudo, dict):
+        problemas.append("la sección [media] debe ser una tabla TOML")
+        return MediaConfig()
+    for clave in crudo:
+        if clave not in _CLAVES_MEDIA:
+            problemas.append(
+                f"clave desconocida '{clave}' en [media] "
+                f"(válidas: {', '.join(sorted(_CLAVES_MEDIA))})."
+            )
+
+    def _booleano(nombre: str, default: bool) -> bool:
+        valor = crudo.get(nombre, default)
+        if not isinstance(valor, bool):
+            problemas.append(f"'{nombre}' en [media] debe ser booleano.")
+            return default
+        return valor
+
+    keyframes = _booleano("keyframes", False)
+    video = _booleano("video", False)
+    encadenar = _booleano("encadenar_frames", True)
+    if video:
+        problemas.append(
+            "'video' en [media] aún no está soportado: la generación I2V "
+            "por escena llega en una fase posterior del plan (spec-recursos-"
+            "ancla §13); usa keyframes = true."
+        )
+        video = False
+
+    proveedor = crudo.get("proveedor_imagen")
+    if proveedor is not None:
+        if not isinstance(proveedor, str) or proveedor.strip().lower() not in PROVEEDORES_DE_IMAGEN:
+            problemas.append(
+                f"'proveedor_imagen' en [media] debe ser uno de: "
+                f"{', '.join(PROVEEDORES_DE_IMAGEN)} (recibido: '{proveedor}')."
+            )
+            proveedor = None
+        else:
+            proveedor = proveedor.strip().lower()
+
+    intentos_qa = crudo.get("intentos_qa", 1)
+    if intentos_qa is not None and (
+        not isinstance(intentos_qa, int) or isinstance(intentos_qa, bool)
+    ):
+        problemas.append("'intentos_qa' en [media] debe ser entero.")
+        intentos_qa = None
+
+    try:
+        return MediaConfig(
+            keyframes=keyframes,
+            video=video,
+            encadenar_frames=encadenar,
+            proveedor_imagen=proveedor,
+            intentos_qa=intentos_qa if intentos_qa is not None else 1,
+        )
+    except ValueError as exc:
+        problemas.append(f"[media] inválido: {exc}")
+        return MediaConfig()
+
+
 def project_from_dict(datos: Dict[str, Any]) -> ProjectSpec:
     """Construye y valida un ``ProjectSpec`` desde el dict parseado del TOML."""
     problemas: List[str] = []
@@ -955,6 +1121,9 @@ def project_from_dict(datos: Dict[str, Any]) -> ProjectSpec:
     agentes = _mapear_agentes(datos, problemas)
     pipeline = _mapear_pipeline(datos, problemas)
     flujo = _mapear_flujo(datos, problemas)
+    anclas = _anclas_habilitadas(datos, problemas)
+    ancla_estilo = _ancla_estilo(datos, problemas)
+    media = _mapear_media(datos, problemas)
     if flujo is not None:
         # Semántica del flujo junto al resto de los problemas (§9: todos se
         # reportan de una vez al cargar el proyecto).
@@ -972,6 +1141,9 @@ def project_from_dict(datos: Dict[str, Any]) -> ProjectSpec:
         agentes=agentes,
         pipeline=pipeline,
         flujo=flujo,
+        anclas=anclas,
+        ancla_estilo=ancla_estilo,
+        media=media,
     )
     spec.validate()
     return spec

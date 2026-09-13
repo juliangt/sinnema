@@ -39,6 +39,7 @@ cada ejecución.
 17. [Estrategia de pruebas](#17-estrategia-de-pruebas)
 18. [Puntos de extensión](#18-puntos-de-extensión)
 19. [Distribución: paquete, servicio web y multi-usuario](#19-distribución-paquete-servicio-web-y-multi-usuario)
+20. [Recursos ancla: consistencia visual (biblioteca, media y QA)](#20-recursos-ancla-consistencia-visual-biblioteca-media-y-qa)
 
 ---
 
@@ -662,7 +663,7 @@ calculado sobre el flujo efectivo del proyecto.
 ```text
 ├── main.py                        # punto de entrada delgado
 ├── proyectos/                     # un <id>.toml por show (datos, no código)
-├── docs/                          # specs: gestión web, agentes dinámicos, red 3D
+├── docs/                          # specs: gestión web, agentes dinámicos, red 3D, recursos ancla
 ├── web/                           # UI 3D (React Three Fiber + Vite + TS); build en web/dist
 ├── scripts/
 │   └── ver_grafo.py               # diagrama Mermaid del grafo + stream en vivo
@@ -970,6 +971,58 @@ activo = false                  # desactiva el agente (planner y scriptwriter no
 `pyproject.toml` (Hatchling) declara el paquete `sinnema`, los extras
 `[server]` y `[dev]`, los entry points `sinnema` y `sinnema-server`, y
 incluye `proyectos/*.toml` dentro de la wheel. Build: `python -m build`.
+
+## 20. Recursos ancla: consistencia visual (biblioteca, media y QA)
+
+Implementación de `docs/spec-recursos-ancla.md` (Fases 0-5; la Fase 6 de
+LoRA/ComfyUI queda como extensión opcional): una **biblioteca por proyecto**
+de personajes, lugares, objetos y estilo con **baterías de imágenes de
+referencia** y descriptores canónicos, para que la identidad visual sobreviva
+a las escenas, a los capítulos y a las corridas.
+
+**Contratos y almacén** (`domain/models/anclas.py`,
+`infrastructure/anclas/store.py`): `RecursoAncla` (estados
+`borrador → propuesto → lockeado → retirado`; retiro no borra), baterías por
+rol (`hero_portrait`, turnarounds, `establishing_shot`, `style_reference`...),
+descriptor canónico EN ≥40 chars y versionado automático al tocar la batería
+de una ancla lockeada. Persistencia en `anclas/<project_id>/anclas.json` +
+archivos de batería bajo `SINNEMA_DATA_DIR` (volumen en Docker). Solo las
+anclas **lockeadas** participan del pipeline; el lock exige batería mínima por
+tipo y es siempre humano.
+
+**Configuración** (opcional): `[visual] anclas = false` (opt-out) y
+`[visual] ancla_estilo = "look-principal"` (estilo global aplicado a todo
+render). La capa de media es opt-in por proyecto: `[media]` con
+`keyframes`, `encadenar_frames`, `proveedor_imagen` (`gemini`/`openai`) e
+`intentos_qa`. Sin anclas ni `[media]`, la corrida es la de siempre
+(paridad testeada). Extras opcionales: `pip install sinnema[media]` (SDKs de
+imagen) y `sinnema[qa]` (ArcFace/DINOv2/CLIP/pHash); sin extras, degradación
+elegante con aviso.
+
+**Pipeline**: el agente de continuidad siembra el "casting" del capítulo
+(`anclas_del_capitulo`) y el director declara las anclas de cada escena
+(`VisualAssetSpec.anclas`) citando su descriptor canónico — los validadores
+rechazan referencias a anclas inexistentes o no lockeadas antes de que el
+artefacto circule. Con `[media].keyframes`, el nodo estructural
+`render_keyframes` genera el keyframe de cada escena vía
+`MediaGenerationPort` (adaptadores Gemini image y OpenAI `gpt-image-1`, con
+resolver que impone identidad-primero y los máximos de cada API), lo encadena
+`last-frame → first-frame`, lo evalúa el `QaVisualService` (coseno de cara
+contra el `hero_portrait`, DINOv2/CLIP, dedup pHash) y reintenta acotado por
+`intentos_qa` con escalado. Cada generación deja su `ManifestDeGeneracion`
+(procedencia: prompt final, modelo, seed, referencias EN ORDEN). El fallo de
+un proveedor deja la escena sin media y la corrida sigue.
+
+**Web y API**: sección "Anclas" en el drawer (alta, batería con drag &
+drop, lock con checklist, retiro, QA medio por ancla), eventos
+`media_start`/`media_end` en el stream del job, keyframes con manifest e
+informe QA en el viewer, y el nodo en la escena 3D. API: CRUD + upload +
+lock + serving bajo `/api/projects/{id}/anclas`, serving de media en
+`/api/media/{ruta}`, candidatos de promoción en
+`GET /api/jobs/{id}/anclas-candidatas` y lock humano de candidatos en
+`POST /api/projects/{id}/anclas/{ancla_id}/promover` — el media aprobado se
+promueve a la batería (`version + 1`) y el casting asistido propone anclas
+para personajes recurrentes del lore. Guía completa: `docs/e2e-recursos-ancla.md`.
 
 ## Licencia
 

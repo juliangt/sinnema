@@ -17,6 +17,7 @@ import logging
 import queue
 import sqlite3
 import threading
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -29,6 +30,7 @@ from sinnema.application.settings import PipelineSettings
 from sinnema.application.use_cases import GenerateSeriesUseCase, build_deliverable
 from sinnema.application.state import PipelineState
 from sinnema.infrastructure.audit import FilesystemAuditTrail
+from sinnema.infrastructure.anclas import DEFAULT_ANCHAS_ROOT, JsonAnchorStore
 from sinnema.infrastructure.llm.gateway import build_gateway
 from sinnema.infrastructure.llm.tools import construir_tools_por_rol
 from sinnema.infrastructure.lore import JsonLoreStore
@@ -70,14 +72,17 @@ class SeriesWorker:
         checkpoint_dir: Path,
         audit_root: Path = Path("auditoria"),
         lore_root: Path = Path("continuidad"),
+        anchor_root: Path = DEFAULT_ANCHAS_ROOT,
         gateway_factory: Optional[Callable[["ProjectSpec"], object]] = None,
         project_loader: Optional[Callable[[str], ProjectSpec]] = None,
         spec_reader: Optional[Callable[[str], dict]] = None,
+        media_factory: Optional[Callable[["ProjectSpec"], object]] = None,
     ) -> None:
         self._store = store
         self._checkpoint_dir = Path(checkpoint_dir)
         self._audit_root = Path(audit_root)
         self._lore_root = Path(lore_root)
+        self._anchor_root = Path(anchor_root)
         #: Fábrica de gateway por proyecto: cada job aplica los overrides
         #: ``[agentes.<rol>]`` vigentes en el TOML al momento de arrancar.
         self._gateway_factory = gateway_factory or build_gateway
@@ -86,6 +91,10 @@ class SeriesWorker:
         #: Lector del dict TOML crudo, para congelar la huella del spec al
         #: arrancar (§11.4); None (CLI) = sin fingerprint.
         self._spec_reader = spec_reader
+        #: Fábrica de dependencias de media (spec-recursos-ancla §6): con
+        #: ``[media].keyframes`` devuelve puerto+almacén; ``None`` o ``None``
+        #: de retorno = corrida sin media (nodo fuera del grafo).
+        self._media_factory = media_factory
         self._queue: "queue.Queue[str]" = queue.Queue()
         self._thread: Optional[threading.Thread] = None
 
@@ -177,6 +186,7 @@ class SeriesWorker:
         marca = job.job_id
         audit = FilesystemAuditTrail(self._audit_root / job.project_id / f"serie_{marca}")
         lore_store = JsonLoreStore(root=self._lore_root)
+        anchor_store = JsonAnchorStore(root=self._anchor_root)
         checkpoint_path = self._checkpoint_dir / f"{marca}.sqlite"
         conn = sqlite3.connect(str(checkpoint_path), check_same_thread=False)
         try:
@@ -235,6 +245,40 @@ class SeriesWorker:
             except (TypeError, ValueError):
                 pass
             gateway = self._gateway_factory(proyecto, **kwargs)
+
+            # Media (spec-recursos-ancla §6): las dependencias se resuelven
+            # POR PROYECTO (solo si [media].keyframes) y el canal de eventos
+            # en vivo se conecta al store del job: media_start/media_end
+            # fluyen al SSE por el mismo camino que token/tool_*.
+            media = self._media_factory(proyecto) if self._media_factory else None
+            if media is not None:
+
+                def sink_media(evento: dict) -> None:
+                    tipo = evento.get("tipo", "media")
+                    escena = evento.get("escena")
+                    if "error" in evento:
+                        mensaje = (
+                            f"Escena {escena} queda sin keyframe: "
+                            f"{evento.get('error')}"
+                        )
+                    elif "archivo" in evento:
+                        mensaje = (
+                            f"Keyframe de la escena {escena}: "
+                            f"{evento.get('archivo')}"
+                        )
+                    else:
+                        mensaje = (
+                            f"Generando keyframe de la escena {escena} "
+                            f"({evento.get('proveedor', 'media')})..."
+                        )
+                    sink(
+                        tipo,
+                        mensaje,
+                        payload={k: v for k, v in evento.items() if k != "tipo"},
+                    )
+
+                media = replace(media, eventos=sink_media)
+
             use_case = GenerateSeriesUseCase(
                 gateway, proyecto,
                 settings=PipelineSettings(
@@ -243,7 +287,8 @@ class SeriesWorker:
                         proyecto.pipeline.politica_al_agotar or "force_accept"
                     ),
                 ),
-                audit=audit, lore_store=lore_store, checkpointer=checkpointer,
+                audit=audit, lore_store=lore_store, anchor_store=anchor_store,
+                checkpointer=checkpointer, media=media,
             )
             # Eventos por nodo (§7.2): el use case reporta qué nodos corrieron
             # por superstep y el runner los publica como node_start/node_end
@@ -267,6 +312,10 @@ class SeriesWorker:
                 sink("progress", describe_progress(paso, estado_final))
             deliverable = build_deliverable(estado_final)
             use_case.save_lore(estado_final)
+            use_case.save_anclas(estado_final)
+            # Casting asistido (spec-recursos-ancla §8.2): propuestas de ancla
+            # para personajes recurrentes del lore sin ancla (best-effort).
+            use_case.save_casting(estado_final)
             return deliverable.model_dump(mode="json")
         finally:
             conn.close()

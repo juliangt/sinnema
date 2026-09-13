@@ -3,6 +3,15 @@
 Re-exporta todos los esquemas para mantener una superficie de importación
 estable (``from sinnema.domain.models import ScriptDraft``).
 """
+from sinnema.domain.models.anclas import (
+    EstadoDeAncla,
+    ImagenAncla,
+    ManifestDeGeneracion,
+    RecursoAncla,
+    ReferenciaAncla,
+    RolDeImagen,
+    TipoDeAncla,
+)
 from sinnema.domain.models.audit import AuditCriterion, AuditFinding, QualityAudit
 from sinnema.domain.models.content import (
     AdaptedScene,
@@ -11,7 +20,20 @@ from sinnema.domain.models.content import (
     ScriptDraft,
     Transition,
 )
-from sinnema.domain.models.continuity import ContinuityDirectives, LoreEntry
+from sinnema.domain.models.continuity import (
+    AnclaDelCapitulo,
+    ContinuityDirectives,
+    LoreEntry,
+)
+from sinnema.domain.models.media import (
+    ErrorDeMedia,
+    InformeQaVisual,
+    MediaCrudo,
+    MediaDelEpisodio,
+    MediaGenerado,
+    MetricaQa,
+    PedidoKeyframe,
+)
 from sinnema.domain.models.deliverable import (
     ApprovedEpisode,
     ArtefactoAdjunto,
@@ -31,6 +53,7 @@ from sinnema.domain.models.technical import (
 __all__ = [
     "AdaptedScene",
     "AdaptedScript",
+    "AnclaDelCapitulo",
     "ApprovedEpisode",
     "AspectRatio",
     "AudioDirection",
@@ -38,18 +61,32 @@ __all__ = [
     "AuditFinding",
     "ChapterOutline",
     "ContinuityDirectives",
+    "EstadoDeAncla",
     "FailedChapterRecord",
     "FinalScene",
     "FormatProfile",
+    "ImagenAncla",
+    "ErrorDeMedia",
+    "InformeQaVisual",
     "LoreEntry",
+    "ManifestDeGeneracion",
+    "MediaCrudo",
+    "MediaDelEpisodio",
+    "MediaGenerado",
+    "MetricaQa",
     "NotasDelAgente",
+    "PedidoKeyframe",
     "QualityAudit",
+    "RecursoAncla",
+    "ReferenciaAncla",
+    "RolDeImagen",
     "Scene",
     "ScriptDraft",
     "SeriesDeliverable",
     "SeriesPlan",
     "TechnicalPackage",
     "TextoLibre",
+    "TipoDeAncla",
     "Transition",
     "VisualAssetSpec",
 ]

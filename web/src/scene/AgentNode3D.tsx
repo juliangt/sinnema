@@ -42,6 +42,10 @@ function GeometriaPorTipo({ tipo }: { tipo: TipoNodo }) {
     case 'enriquecedor':
       // Esfera facetada: segmentos bajos + flatShading.
       return <sphereGeometry args={[1.0, 12, 9]} />
+    case 'media':
+      // Panel de keyframe (recursos-ancla §9.2): placa vertical fina,
+      // como un marco de película entre el enriquecimiento y el cierre.
+      return <boxGeometry args={[1.3, 0.95, 0.14]} />
     case 'cierre':
       // Anillo fino a escala menor.
       return <torusGeometry args={[0.85, 0.08, 8, 48]} />

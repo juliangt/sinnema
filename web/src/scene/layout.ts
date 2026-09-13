@@ -30,7 +30,8 @@ export interface LayoutRed {
   caja: CajaDeRed
 }
 
-/** Orden de columnas en X por fase (§9.1). */
+/** Orden de columnas en X por fase (§9.1). 'media' (recursos-ancla §9.2)
+ *  queda entre el enriquecimiento y el cierre, como en el grafo. */
 export const ORDEN_FASES: readonly FaseId[] = [
   'serie',
   'contexto',
@@ -38,6 +39,7 @@ export const ORDEN_FASES: readonly FaseId[] = [
   'transformacion',
   'compuerta',
   'enriquecimiento',
+  'media',
   'cierre',
 ]
 

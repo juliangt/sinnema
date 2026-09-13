@@ -20,8 +20,10 @@ from sinnema.domain.models import (
     ChapterOutline,
     ContinuityDirectives,
     FormatProfile,
+    ImagenAncla,
     LoreEntry,
     QualityAudit,
+    RecursoAncla,
     Scene,
     ScriptDraft,
     SeriesPlan,
@@ -211,6 +213,50 @@ def make_lore_entry(term: str = "modelo", chapter_id: str = "ch-01") -> LoreEntr
         first_seen_title="Capítulo de origen",
         category="concepto",
     )
+
+
+def make_imagen_ancla(
+    rol: str = "hero_portrait", archivo: Optional[str] = None, **overrides
+) -> ImagenAncla:
+    """Imagen de batería válida por defecto (sin manifest: origen 'subida')."""
+    datos = dict(rol=rol, archivo=archivo if archivo is not None else f"{rol}_1.png")
+    datos.update(overrides)
+    return ImagenAncla(**datos)
+
+
+def _bateria_por_tipo(tipo: str) -> List[ImagenAncla]:
+    """Batería mínima completa por tipo: anclas listas para lockear en tests."""
+    minima = {
+        "personaje": ("hero_portrait", "turnaround_front", "turnaround_side",
+                      "turnaround_back"),
+        "lugar": ("establishing_shot",),
+        "objeto": ("prop_hero",),
+        "estilo": ("style_reference",),
+    }
+    return [make_imagen_ancla(rol) for rol in minima[tipo]]
+
+
+def make_ancla(
+    ancla_id: str = "protagonista",
+    tipo: str = "personaje",
+    estado: str = "borrador",
+    bateria: Optional[List[ImagenAncla]] = None,
+    **overrides,
+) -> RecursoAncla:
+    """Ancla válida por defecto (en borrador, sin exigencia de batería)."""
+    datos = dict(
+        ancla_id=ancla_id,
+        tipo=tipo,
+        nombre=ancla_id.replace("-", " ").capitalize(),
+        descripcion_canonica=(
+            "A friendly recurring character described with stable canonical "
+            "traits for image models"
+        ),
+        estado=estado,
+        bateria=bateria if bateria is not None else _bateria_por_tipo(tipo),
+    )
+    datos.update(overrides)
+    return RecursoAncla(**datos)
 
 
 def make_project(**overrides) -> ProjectSpec:

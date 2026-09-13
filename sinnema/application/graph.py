@@ -13,6 +13,8 @@ Topología del grafo se resuelve desde el flujo efectivo del proyecto
             |-- approve ---> enriquecedores | commit
             |-- skip_chapter -> fail_chapter (reintentos agotados))?
       -> [enriquecedores]*                  (Visual/Audio Director, ...)
+      -> render_keyframes                   (media: keyframes por escena; SOLO
+                                             si [media].keyframes = true)
       -> commit_episode                     (consolida episodio + actualiza lore)
            |-- next_chapter ---> primer nodo del capítulo
            |-- series_complete -> END
@@ -35,7 +37,7 @@ ensamblado del entregable), no la de un agente en particular.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
@@ -48,9 +50,11 @@ from sinnema.application.ports import (
     ROLE_PLANNER,
     ROLE_SCRIPTWRITER,
     AuditTrailPort,
+    DependenciasMedia,
     NullAuditTrail,
     StructuredGenerationPort,
 )
+from sinnema.application.nodos_media import ROL_ADJUNTO_MEDIA, make_render_keyframes_node
 from sinnema.application.projects import ProjectSpec, resolver_flujo
 from sinnema.application.registry import (
     AGENT_REGISTRY,
@@ -61,12 +65,15 @@ from sinnema.application.registry import (
 )
 from sinnema.application.settings import PipelineSettings
 from sinnema.application.state import PipelineState
-from sinnema.domain.models import ArtefactoAdjunto
+from sinnema.domain.models import ArtefactoAdjunto, RecursoAncla
 from sinnema.domain.services import (
+    anclas_referenciadas,
     assemble_episode,
     build_failed_record,
+    cobertura_casting,
     extract_new_lore,
     identity_adaptation,
+    registrar_vigencia_de_anclas,
 )
 
 logger = logging.getLogger("sinnema.graph")
@@ -188,15 +195,25 @@ def build_pipeline_graph(
     settings: Optional[PipelineSettings] = None,
     audit: Optional[AuditTrailPort] = None,
     checkpointer: Optional[BaseCheckpointSaver] = None,
+    anclas: Optional[List[RecursoAncla]] = None,
+    media: Optional[DependenciasMedia] = None,
 ) -> CompiledStateGraph:
     """Compone y compila el grafo de estado cíclico para un proyecto.
 
     El ``checkpointer`` es opcional: presente, cada superstep persiste el
     estado y una corrida puede reanudarse (thread_id = id de ejecución).
+    ``anclas`` es la biblioteca lockeada del proyecto (spec-recursos-ancla
+    §5.1): presente y no vacía, los system prompts de los roles con conciencia
+    visual componen sus reglas de identidad fija; ausente, los prompts son
+    exactamente los de siempre. ``media`` (§6) es el paquete puerto+almacén
+    de la capa de media: presente JUNTO con ``[media].keyframes = true``,
+    entre el enriquecimiento y el commit se inserta el nodo estructural
+    ``render_keyframes``; ausente o con keyframes off, la topología es la de
+    siempre (paridad).
     """
     settings = settings or PipelineSettings()
     audit = audit or NullAuditTrail()
-    system_prompts = build_role_system_prompts(project)
+    system_prompts = build_role_system_prompts(project, anclas=anclas)
     # Catálogo completo del proyecto: registro global + agentes custom del
     # TOML. El flujo solo referencia roles presentes aquí.
     definiciones = definiciones_del_proyecto(project)
@@ -304,6 +321,10 @@ def build_pipeline_graph(
         _, capitulo, indice = capitulo_actual(state)
         paquete = state.get("technical_package")
         dictamen = state.get("qa_verdict")
+        # Entregable 1.2 (spec-recursos-ancla §10): el adjunto ``media`` de la
+        # pizarra alimenta FinalScene.keyframe por escena; sin media (capa
+        # desactivada o nodo ausente) las escenas quedan con default (paridad).
+        media_adjunto = (state.get("artefactos") or {}).get(ROL_ADJUNTO_MEDIA)
         episodio = assemble_episode(
             chapter=capitulo,
             order_index=indice + 1,
@@ -312,10 +333,33 @@ def build_pipeline_graph(
             package=paquete,
             audit=dictamen,
             adjuntos=_adjuntos_del_estado(state, paquete=paquete, dictamen=dictamen),
+            media=media_adjunto,
         )
         lore_nuevo = extract_new_lore(
-            capitulo, state.get("continuity_directives"), state.get("lore_entries", [])
+            capitulo,
+            state.get("continuity_directives"),
+            state.get("lore_entries", []),
+            anclas=state.get("anclas") or [],
         )
+        # Libro contable de anclas (spec-recursos-ancla §5.4): las referencias
+        # del paquete estampan la vigencia (first/last seen) en el catálogo en
+        # memoria; la persistencia al final de la corrida va por el mismo
+        # camino que consolida el lore (use case.save_anclas).
+        usadas = anclas_referenciadas(paquete)
+        anclas_actualizadas = registrar_vigencia_de_anclas(
+            state.get("anclas") or [], usadas, capitulo.chapter_id
+        )
+        # Cobertura blanda casting↔specs (§5.3): no rechaza; queda como
+        # hallazgo de auditoría para revisión humana.
+        directivas = state.get("continuity_directives")
+        if directivas is not None and paquete is not None:
+            sin_cobertura = cobertura_casting(directivas.anclas_del_capitulo, paquete)
+            if sin_cobertura:
+                audit.log_event(
+                    f"Cobertura de anclas de {capitulo.chapter_id}: el casting "
+                    f"declara '{', '.join(sin_cobertura)}' pero ninguna spec "
+                    "las referencia."
+                )
         logger.info(
             "Episodio commit: %s (%s) · +%d entradas de lore.",
             capitulo.chapter_id,
@@ -329,7 +373,7 @@ def build_pipeline_graph(
             f"· +{len(lore_nuevo)} entrada(s) de lore.",
             artifact=episodio,
         )
-        return {
+        actualizacion: Dict[str, Any] = {
             "completed_episodes": [episodio],
             "lore_entries": lore_nuevo,
             "current_chapter_index": indice + 1,
@@ -344,6 +388,9 @@ def build_pipeline_graph(
             # los adjuntos ya viajan dentro del episodio consolidado.
             "artefactos": {clave: None for clave in (state.get("artefactos") or {})},
         }
+        if anclas_actualizadas is not None:
+            actualizacion["anclas"] = anclas_actualizadas
+        return actualizacion
 
     def _fail_chapter(state: PipelineState) -> Dict[str, Any]:
         """Política 'skip_chapter': descarta el capítulo y registra el fallo."""
@@ -419,8 +466,6 @@ def build_pipeline_graph(
 
     # ----------------------------- GRAFO -----------------------------
 
-    flujo = resolver_flujo(project)
-
     def _agregar_agente(rol: str) -> str:
         """Registra el nodo del rol (nombre estable) y devuelve su nombre."""
         definicion = definiciones[rol]
@@ -432,6 +477,26 @@ def build_pipeline_graph(
 
     workflow = StateGraph(PipelineState)
     workflow.add_node("plan_series", _plan_series)
+
+    # Capa de media (§6): el nodo estructural solo participa con keyframes
+    # activados Y dependencias inyectadas; en otro caso la topología (y el
+    # límite de recursión) es byte a byte la de siempre. Con ``hasta = "plan"``
+    # tampoco: la corrida termina sin episodios (no hay escenas que renderizar)
+    # y el nodo quedaría colgando de un commit que nunca se declara.
+    flujo = resolver_flujo(project)
+    usar_media = (
+        media is not None
+        and project.media.keyframes
+        and flujo.hasta != "plan"
+    )
+    destino_commit = "commit_episode"
+    if usar_media:
+        workflow.add_node(
+            "render_keyframes",
+            make_render_keyframes_node(project, media, audit),
+        )
+        workflow.add_edge("render_keyframes", "commit_episode")
+        destino_commit = "render_keyframes"
 
     if flujo.hasta == "plan":
         # Sin bucle de capítulos: planificar la serie y consolidar el outline.
@@ -488,7 +553,9 @@ def build_pipeline_graph(
             _route_after_critic,
             {
                 "revise": nodo_escritor,
-                "approve": primero or "commit_episode",
+                # Con media y sin enriquecedores, el approve pasa por el nodo
+                # de keyframes antes del commit.
+                "approve": primero or destino_commit,
                 "skip_chapter": "fail_chapter",
             },
         )
@@ -505,7 +572,7 @@ def build_pipeline_graph(
 
     workflow.add_node("commit_episode", _commit_episode)
     if cursor is not None:
-        workflow.add_edge(cursor, "commit_episode")
+        workflow.add_edge(cursor, destino_commit)
 
     if flujo.revisor is not None:
         workflow.add_node("fail_chapter", _fail_chapter)

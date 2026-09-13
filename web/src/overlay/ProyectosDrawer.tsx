@@ -6,6 +6,7 @@
 import { useState } from 'react'
 import { api } from '../api/client'
 import { useProjectStore } from '../stores/projectStore'
+import { AnclasSeccion } from './AnclasSeccion'
 import type { ProjectDetail } from '../types'
 
 function proyectoBase(id: string, marca: string): ProjectDetail {
@@ -39,7 +40,7 @@ export function ProyectosDrawer({ abierto, onCerrar }: { abierto: boolean; onCer
   const catalogos = useProjectStore((s) => s.catalogos)
   const seleccionarProyecto = useProjectStore((s) => s.seleccionarProyecto)
 
-  const [seccion, setSeccion] = useState<'proyectos' | 'customs' | 'lore'>('proyectos')
+  const [seccion, setSeccion] = useState<'proyectos' | 'customs' | 'lore' | 'anclas'>('proyectos')
   const [nuevoId, setNuevoId] = useState('')
   const [nuevaMarca, setNuevaMarca] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -188,7 +189,7 @@ export function ProyectosDrawer({ abierto, onCerrar }: { abierto: boolean; onCer
       <header className="flex items-center gap-2 border-b border-borde/70 px-3 py-2">
         <h2 className="font-semibold tracking-wide text-texto">Proyectos</h2>
         <div className="flex gap-1">
-          {(['proyectos', 'customs', 'lore'] as const).map((s) => (
+          {(['proyectos', 'customs', 'lore', 'anclas'] as const).map((s) => (
             <button
               key={s}
               type="button"
@@ -337,6 +338,8 @@ export function ProyectosDrawer({ abierto, onCerrar }: { abierto: boolean; onCer
             )}
           </>
         )}
+
+        {seccion === 'anclas' && <AnclasSeccion />}
 
         {seccion === 'lore' && (
           <>

@@ -2,7 +2,7 @@
 
 Cubren el parseo y las validaciones de composición/alcance (§9 de la spec),
 el truncado por hito, la topología del grafo por configuración, el pipeline
-de punta a punta por hito (con el doble del puerto LLM) y el entregable 1.1.
+de punta a punta por hito (con el doble del puerto LLM) y el entregable 1.2.
 """
 from __future__ import annotations
 
@@ -322,10 +322,10 @@ def test_corrida_sin_flujo_conserva_el_pipeline_completo():
         assert gw.calls.count(rol) == esperado, rol
     entregable = build_deliverable(final)
     assert entregable.alcance == "produccion"
-    assert entregable.schema_version == "1.1"
+    assert entregable.schema_version == "1.2"
 
 
-# ----------------------------- entregable 1.1 -----------------------------
+# ----------------------------- entregable 1.2 -----------------------------
 
 
 def test_adjunto_de_artefacto_modelo_basico():

@@ -1,16 +1,36 @@
 """Prompts del TECHNICAL ADAPTER / VISUAL & AUDIO DIRECTOR por proyecto."""
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 
 from sinnema.application.projects import ProjectSpec
-from sinnema.domain.models import AdaptedScript, ChapterOutline, ScriptDraft
+from sinnema.application.prompts._render import format_biblioteca_anclas
+from sinnema.domain.models import (
+    AdaptedScript,
+    AnclaDelCapitulo,
+    ChapterOutline,
+    RecursoAncla,
+    ScriptDraft,
+)
+
+_SECCION_ANCLAS = """
+
+BIBLIOTECA DE ANCLAS (identidad visual fija)
+- Toda entidad con ancla presente en la escena DEBE declararse en `anclas`
+  (su ancla_id) y describirse en `image_prompt` con su descriptor canónico;
+  los personajes/lugares anclados NUNCA se describen con palabras nuevas.
+- `thumbnail_prompt` puede citar el ancla de estilo y la del personaje
+  principal del capítulo.
+- Jamás declares un ancla_id ausente de la biblioteca: el sistema rechaza el
+  paquete."""
 
 
-def build_system_prompt(spec: ProjectSpec) -> str:
+def build_system_prompt(
+    spec: ProjectSpec, anclas: Optional[List[RecursoAncla]] = None
+) -> str:
     f = spec.format
     s_min, s_max = f.scenes_count
-    return f"""Eres el TECHNICAL ADAPTER / VISUAL & AUDIO DIRECTOR de "{spec.brand_name}".
+    prompt = f"""Eres el TECHNICAL ADAPTER / VISUAL & AUDIO DIRECTOR de "{spec.brand_name}".
 
 Traduces guiones aprobados en {spec.language} a especificaciones técnicas de
 producción para modelos generativos secundarios (imagen, video, voz, música,
@@ -45,6 +65,9 @@ REGLAS
   (ni tildes ni ñ: el sistema lo verifica).
 - Coherencia total entre escenas: mismos personajes, misma paleta, mismo mundo.
 Responde EXCLUSIVAMENTE mediante el esquema estructurado."""
+    if not anclas:
+        return prompt
+    return prompt + _SECCION_ANCLAS
 
 
 def build_user_message(
@@ -53,6 +76,8 @@ def build_user_message(
     draft: ScriptDraft,
     adapted: AdaptedScript,
     recurring_elements: List[str],
+    anclas: Optional[List[RecursoAncla]] = None,
+    casting: Optional[List[AnclaDelCapitulo]] = None,
 ) -> str:
     visuales = {s.scene_number: s for s in draft.scenes}
     escenas = []
@@ -64,12 +89,32 @@ def build_user_message(
             f"    acción visual: {base.visual_action if base else '(sin referencia)'}\n"
             f"    narración final (referencia de contenido): {s.narration}"
         )
+    bloque_biblioteca = (
+        "<biblioteca_de_anclas>\n"
+        f"{format_biblioteca_anclas(anclas)}\n"
+        "</biblioteca_de_anclas>\n"
+        if anclas
+        else ""
+    )
+    bloque_casting = (
+        "<casting_del_capitulo>\n"
+        + "\n".join(
+            f"- [{cita.tipo}] {cita.ancla_id} :: {cita.descriptor} | "
+            f"instrucciones: {cita.instrucciones}"
+            for cita in (casting or [])
+        )
+        + "\n</casting_del_capitulo>\n"
+        if casting
+        else ""
+    )
     return (
         "<encargo_tecnico>\n"
         f"<capitulo>{chapter.chapter_id} — {chapter.title}</capitulo>\n"
         f"<guia_de_estilo>{spec.style_guide}</guia_de_estilo>\n"
         f"<estilo_maestro>{spec.visual_master_style}</estilo_maestro>\n"
         f"<elementos_recurrentes>{'; '.join(recurring_elements) or '(sin definir)'}</elementos_recurrentes>\n"
+        f"{bloque_biblioteca}"
+        f"{bloque_casting}"
         "<escenas_aprobadas>\n"
         f"{chr(10).join(escenas)}\n"
         "</escenas_aprobadas>\n"

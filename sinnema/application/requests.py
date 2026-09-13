@@ -17,7 +17,7 @@ from sinnema.application.projects import (
 )
 from sinnema.application.state import PipelineState
 from sinnema.domain.constants import SERIES_MAX_CHAPTERS
-from sinnema.domain.models import LoreEntry
+from sinnema.domain.models import LoreEntry, RecursoAncla
 
 MAX_CRITIQUE_ATTEMPTS_LIMIT = 5
 
@@ -71,13 +71,17 @@ class SeriesRequest:
 def build_initial_state(
     request: SeriesRequest,
     initial_lore: Optional[List[LoreEntry]] = None,
+    initial_anclas: Optional[List[RecursoAncla]] = None,
 ) -> PipelineState:
     """Proyecta la petición validada al estado inicial del grafo.
 
     ``initial_lore`` siembra la memoria de continuidad persistida del proyecto
     (vacía en la primera corrida); el grafo la amplía de forma append-only.
-    El ``alcance`` (hito del flujo resuelto) viaja en el estado: el
-    consolidador lo estampa en el entregable.
+    ``initial_anclas`` siembra la biblioteca de anclas lockeadas del proyecto
+    (spec-recursos-ancla §5.1): catálogo fijo de solo-lectura durante la
+    corrida; vacío (o ausente) cuando el proyecto no participa de la
+    biblioteca. El ``alcance`` (hito del flujo resuelto) viaja en el estado:
+    el consolidador lo estampa en el entregable.
     """
     request.validate()
     proyecto = request.project
@@ -99,6 +103,7 @@ def build_initial_state(
         "critique_attempts": 0,
         # c/e) Acumuladores
         "lore_entries": list(initial_lore or []),
+        "anclas": list(initial_anclas or []),
         "completed_episodes": [],
         "failed_chapters": [],
     }

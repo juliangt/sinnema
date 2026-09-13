@@ -606,6 +606,70 @@ def test_red_con_hasta_plan_cierra_sin_bucle_de_capitulos(gestion):
     }
 
 
+# ------------- /red con la capa de media (spec-recursos-ancla §9.2) -------------
+
+
+def test_red_sin_media_es_exactamente_la_de_siempre(gestion):
+    """Paridad dura: sin sección [media], la red NO cambia (mismo nodo set
+    que el test por defecto; render_keyframes ni se asoma)."""
+    client, _, _, _ = gestion
+    client.post("/api/projects", json=_proyecto_json())
+    red = client.get("/api/projects/mi-show/red").json()
+    assert {n["id"] for n in red["nodes"]} == {
+        "plan_series", "continuity_master", "scriptwriter", "persona_adapter",
+        "chief_critic", "technical_director", "commit_episode", "fail_chapter",
+    }
+
+
+def test_red_con_media_incluye_el_nodo_render_keyframes(gestion):
+    """Con ``[media].keyframes = true`` el nodo estructural entra SOLO por
+    derivación del grafo (§9.2), entre el enriquecimiento y el commit."""
+    client, _, _, _ = gestion
+    client.post("/api/projects", json=_proyecto_json(media={"keyframes": True}))
+    red = client.get("/api/projects/mi-show/red").json()
+    nodos = {n["id"]: n for n in red["nodes"]}
+    assert set(nodos) == {
+        "plan_series", "continuity_master", "scriptwriter", "persona_adapter",
+        "chief_critic", "technical_director", "render_keyframes",
+        "commit_episode", "fail_chapter",
+    }
+    media = nodos["render_keyframes"]
+    assert media["rol"] is None
+    assert media["tipo"] == "media"
+    assert media["fase"] == "media"
+    assert media["estructural"] is True
+    assert media["esencial"] is False
+    assert media["llm"] is None
+    assert "keyframe" in media["descripcion"]
+    # Cableado real del grafo: último enriquecedor → media → commit.
+    aristas = {e["id"] for e in red["edges"]}
+    assert "technical_director->render_keyframes" in aristas
+    assert "render_keyframes->commit_episode" in aristas
+
+
+def test_red_con_media_coincide_con_el_mermaid_de_flujo_efectivo(gestion):
+    """El invariante /red == Mermaid se sostiene también con el nodo media."""
+    client, _, _, _ = gestion
+    client.post("/api/projects", json=_proyecto_json(media={"keyframes": True}))
+    red = client.get("/api/projects/mi-show/red").json()
+    mermaid = client.get("/api/projects/mi-show/flujo-efectivo").json()["mermaid"]
+    ids_mermaid = _ids_de_mermaid(mermaid) - {"__start__", "__end__"}
+    assert {n["id"] for n in red["nodes"]} == ids_mermaid
+    assert "render_keyframes" in ids_mermaid
+
+
+def test_red_con_media_y_hasta_plan_no_tiene_nodo_de_media(gestion):
+    """hasta = plan: la corrida termina sin episodios, no hay escenas que
+    renderizar — el nodo no entra (y el grafo compila sin aristas colgando)."""
+    client, _, _, _ = gestion
+    client.post("/api/projects", json=_proyecto_json(
+        flujo={"contexto": ["continuity"], "hasta": "plan"},
+        media={"keyframes": True},
+    ))
+    red = client.get("/api/projects/mi-show/red").json()
+    assert {n["id"] for n in red["nodes"]} == {"plan_series", "consolidar_plan"}
+
+
 # ------------------------ /api/meta/catalogos (spec §5) ------------------------
 
 
@@ -631,6 +695,30 @@ def test_meta_catalogos_para_los_formularios(cliente):
     assert set(cuerpo["entradas_custom"]) == {
         "capitulo", "guion", "lore", "plan", "directivas",
     }
+
+
+def test_meta_catalogos_expone_los_catalogos_de_anclas(cliente):
+    """Catálogos de la biblioteca (spec-recursos-ancla §9.1): tipos, estados,
+    roles de batería por tipo y batería mínima (checklist del lock en la web)."""
+    client, _ = cliente
+    anclas = client.get("/api/meta/catalogos").json()["anclas"]
+    assert anclas["tipos"] == ["personaje", "lugar", "objeto", "estilo"]
+    assert anclas["estados"] == ["borrador", "propuesto", "lockeado", "retirado"]
+    assert anclas["roles_por_tipo"]["personaje"] == [
+        "hero_portrait", "turnaround_front", "turnaround_quarter",
+        "turnaround_side", "turnaround_back", "expression_sheet", "outfit_variant",
+    ]
+    assert anclas["roles_por_tipo"]["lugar"] == [
+        "establishing_shot", "coverage_angle", "lighting_reference",
+    ]
+    assert anclas["roles_por_tipo"]["objeto"] == ["prop_hero", "prop_detail"]
+    assert anclas["roles_por_tipo"]["estilo"] == ["style_reference"]
+    assert anclas["bateria_minima"]["personaje"] == [
+        "hero_portrait", "turnaround_front", "turnaround_side", "turnaround_back",
+    ]
+    assert anclas["bateria_minima"]["lugar"] == ["establishing_shot"]
+    assert anclas["bateria_minima"]["objeto"] == ["prop_hero"]
+    assert anclas["bateria_minima"]["estilo"] == ["style_reference"]
 
 
 # ------------- Round-trip de la config LLM por PUT/GET (spec §14) -------------
