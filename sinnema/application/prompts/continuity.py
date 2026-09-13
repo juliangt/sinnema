@@ -4,12 +4,26 @@ from __future__ import annotations
 from typing import List, Optional
 
 from sinnema.application.projects import ProjectSpec
-from sinnema.application.prompts._render import format_lore
-from sinnema.domain.models import ChapterOutline, LoreEntry
+from sinnema.application.prompts._render import format_biblioteca_anclas, format_lore
+from sinnema.domain.models import ChapterOutline, LoreEntry, RecursoAncla
+
+_SECCION_ANCLAS = """
+
+BIBLIOTECA DE ANCLAS (identidad visual fija)
+- Los personajes/lugares con ancla tienen apariencia FIJA: se citan por su
+  nombre canónico y su descriptor, NUNCA se re-describen con rasgos nuevos o
+  divergentes.
+- `anclas_del_capitulo`: elige de la biblioteca las anclas que participan de
+  ESTE capítulo y declara su rol aquí. En `descriptor` copia EXACTO (en
+  inglés) del descriptor canónico; en `instrucciones` describe en {language}
+  su rol en el capítulo (vestuario, estado, tratamiento).
+- Si una entidad del capítulo NO tiene ancla en la biblioteca, trátala como
+  siempre: jamás inventes anclas ni cites ids ausentes (el sistema lo
+  rechaza)."""
 
 
-def build_system_prompt(spec: ProjectSpec) -> str:
-    return f"""Eres el CONTINUITY MASTER / LORE KEEPER de "{spec.brand_name}".
+def build_system_prompt(spec: ProjectSpec, anclas: Optional[List[RecursoAncla]] = None) -> str:
+    prompt = f"""Eres el CONTINUITY MASTER / LORE KEEPER de "{spec.brand_name}".
 
 Custodias la memoria canónica de la serie (el "lore"): todos los conceptos,
 términos, personajes y referencias ya establecidos en capítulos anteriores.
@@ -37,6 +51,9 @@ REGLAS
 - Sé específico y accionable: el guionista solo verá tus directivas.
 - Escribe las directivas en {spec.language}.
 - Responde EXCLUSIVAMENTE mediante el esquema estructurado."""
+    if not anclas:
+        return prompt
+    return prompt + _SECCION_ANCLAS.format(language=spec.language)
 
 
 def build_user_message(
@@ -44,11 +61,19 @@ def build_user_message(
     previous_chapter: Optional[ChapterOutline],
     lore_entries: List[LoreEntry],
     recurring_elements: List[str],
+    anclas: Optional[List[RecursoAncla]] = None,
 ) -> str:
     previo = (
         f"{previous_chapter.chapter_id} — {previous_chapter.title}"
         if previous_chapter is not None
         else "(ninguno: primer capítulo de la serie)"
+    )
+    bloque_anclas = (
+        "<biblioteca_de_anclas>\n"
+        f"{format_biblioteca_anclas(anclas)}\n"
+        "</biblioteca_de_anclas>\n"
+        if anclas
+        else ""
     )
     return (
         "<contexto_de_continuidad>\n"
@@ -64,6 +89,7 @@ def build_user_message(
         f"{format_lore(lore_entries)}\n"
         "</memoria_lore>\n"
         f"<elementos_recurrentes>{'; '.join(recurring_elements) or '(sin definir)'}</elementos_recurrentes>\n"
+        f"{bloque_anclas}"
         "</contexto_de_continuidad>\n\n"
         "Emite las directivas de continuidad para este capítulo."
     )

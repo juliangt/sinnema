@@ -6,6 +6,7 @@ from typing import List, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from sinnema.domain.constants import LORE_TERM_MAX_WORDS
+from sinnema.domain.models.anclas import TipoDeAncla
 
 
 class LoreEntry(BaseModel):
@@ -29,6 +30,29 @@ class LoreEntry(BaseModel):
                 f"palabras (recibido: '{limpio}')."
             )
         return limpio
+
+
+class AnclaDelCapitulo(BaseModel):
+    """Cita de un ancla en el casting del capítulo (spec-recursos-ancla §5.1).
+
+    El continuity master selecciona del catálogo lockeado las entidades que
+    participan del capítulo: el ``descriptor`` es copia EN del canónico
+    (trazabilidad del prompt) y las ``instrucciones`` describen en el idioma
+    del proyecto el rol del ancla aquí (vestuario, estado, tratamiento).
+    """
+
+    ancla_id: str = Field(..., min_length=1, description="ancla_id del catálogo lockeado del proyecto.")
+    tipo: TipoDeAncla
+    descriptor: str = Field(
+        ...,
+        min_length=1,
+        description="Copia EN del descriptor canónico del ancla (sin paráfrasis).",
+    )
+    instrucciones: str = Field(
+        ...,
+        min_length=5,
+        description="Rol del ancla en este capítulo (vestuario, estado, tratamiento).",
+    )
 
 
 class ContinuityDirectives(BaseModel):
@@ -65,6 +89,10 @@ class ContinuityDirectives(BaseModel):
         min_length=5,
         description="Notas operativas para el guionista sobre hilos narrativos.",
     )
+    #: Casting visual del capítulo (spec-recursos-ancla §5.1): anclas lockeadas
+    #: que participan aquí, con su rol. Default vacío = proyecto sin anclas o
+    #: capítulo sin anclados: compatible con contratos y corridas previas.
+    anclas_del_capitulo: List[AnclaDelCapitulo] = Field(default_factory=list)
 
     @field_validator("new_terms_to_introduce")
     @classmethod

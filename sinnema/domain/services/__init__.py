@@ -1,4 +1,5 @@
 """Servicios de dominio: lógica de negocio pura sobre las entidades."""
+from sinnema.domain.services.anclas import validate_continuity_anchors
 from sinnema.domain.services.assembly import (
     assemble_episode,
     build_failed_record,
@@ -25,6 +26,7 @@ __all__ = [
     "validate_adaptation_format",
     "validate_adaptation_matches_draft",
     "validate_audit_verdict",
+    "validate_continuity_anchors",
     "validate_draft_format",
     "validate_package_format",
     "validate_package_matches_draft",

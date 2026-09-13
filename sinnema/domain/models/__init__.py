@@ -20,7 +20,11 @@ from sinnema.domain.models.content import (
     ScriptDraft,
     Transition,
 )
-from sinnema.domain.models.continuity import ContinuityDirectives, LoreEntry
+from sinnema.domain.models.continuity import (
+    AnclaDelCapitulo,
+    ContinuityDirectives,
+    LoreEntry,
+)
 from sinnema.domain.models.deliverable import (
     ApprovedEpisode,
     ArtefactoAdjunto,
@@ -40,6 +44,7 @@ from sinnema.domain.models.technical import (
 __all__ = [
     "AdaptedScene",
     "AdaptedScript",
+    "AnclaDelCapitulo",
     "ApprovedEpisode",
     "AspectRatio",
     "AudioDirection",

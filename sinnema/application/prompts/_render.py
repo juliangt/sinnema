@@ -1,9 +1,9 @@
 """Serializadores compartidos entre constructores de mensajes de usuario."""
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 
-from sinnema.domain.models import LoreEntry, ScriptDraft
+from sinnema.domain.models import LoreEntry, RecursoAncla, ScriptDraft
 
 
 def format_lore(entries: List[LoreEntry]) -> str:
@@ -15,6 +15,19 @@ def format_lore(entries: List[LoreEntry]) -> str:
         for e in entries
     ]
     return "\n".join(lineas)
+
+
+def format_biblioteca_anclas(anclas: Optional[List[RecursoAncla]]) -> str:
+    """Serializa la biblioteca lockeada (spec-recursos-ancla §5.1/§5.3).
+
+    Una línea por ancla: tipo, id, nombre canónico y descriptor EN. El bloque
+    resultante alimenta a continuity y al director técnico; vacío solo si no
+    hay lockeadas (los llamadores omiten el bloque completo en ese caso).
+    """
+    return "\n".join(
+        f"- [{a.tipo}] {a.ancla_id} :: {a.nombre} :: {a.descripcion_canonica}"
+        for a in (anclas or [])
+    )
 
 
 def format_draft_scenes(draft: ScriptDraft) -> str:

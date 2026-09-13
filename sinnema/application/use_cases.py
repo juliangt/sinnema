@@ -109,7 +109,7 @@ class GenerateSeriesUseCase:
         self._anclas_lockeadas: List[RecursoAncla] = self._cargar_anclas_lockeadas()
         self._graph = build_pipeline_graph(
             gateway, project, self._settings, audit=self._audit,
-            checkpointer=checkpointer,
+            checkpointer=checkpointer, anclas=self._anclas_lockeadas,
         )
 
     def _cargar_anclas_lockeadas(self) -> List[RecursoAncla]:

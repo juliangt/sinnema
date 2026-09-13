@@ -35,7 +35,7 @@ ensamblado del entregable), no la de un agente en particular.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
@@ -61,7 +61,7 @@ from sinnema.application.registry import (
 )
 from sinnema.application.settings import PipelineSettings
 from sinnema.application.state import PipelineState
-from sinnema.domain.models import ArtefactoAdjunto
+from sinnema.domain.models import ArtefactoAdjunto, RecursoAncla
 from sinnema.domain.services import (
     assemble_episode,
     build_failed_record,
@@ -188,15 +188,20 @@ def build_pipeline_graph(
     settings: Optional[PipelineSettings] = None,
     audit: Optional[AuditTrailPort] = None,
     checkpointer: Optional[BaseCheckpointSaver] = None,
+    anclas: Optional[List[RecursoAncla]] = None,
 ) -> CompiledStateGraph:
     """Compone y compila el grafo de estado cíclico para un proyecto.
 
     El ``checkpointer`` es opcional: presente, cada superstep persiste el
     estado y una corrida puede reanudarse (thread_id = id de ejecución).
+    ``anclas`` es la biblioteca lockeada del proyecto (spec-recursos-ancla
+    §5.1): presente y no vacía, los system prompts de los roles con conciencia
+    visual componen sus reglas de identidad fija; ausente, los prompts son
+    exactamente los de siempre.
     """
     settings = settings or PipelineSettings()
     audit = audit or NullAuditTrail()
-    system_prompts = build_role_system_prompts(project)
+    system_prompts = build_role_system_prompts(project, anclas=anclas)
     # Catálogo completo del proyecto: registro global + agentes custom del
     # TOML. El flujo solo referencia roles presentes aquí.
     definiciones = definiciones_del_proyecto(project)
