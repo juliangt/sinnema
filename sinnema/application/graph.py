@@ -63,10 +63,13 @@ from sinnema.application.settings import PipelineSettings
 from sinnema.application.state import PipelineState
 from sinnema.domain.models import ArtefactoAdjunto, RecursoAncla
 from sinnema.domain.services import (
+    anclas_referenciadas,
     assemble_episode,
     build_failed_record,
+    cobertura_casting,
     extract_new_lore,
     identity_adaptation,
+    registrar_vigencia_de_anclas,
 )
 
 logger = logging.getLogger("sinnema.graph")
@@ -321,6 +324,25 @@ def build_pipeline_graph(
         lore_nuevo = extract_new_lore(
             capitulo, state.get("continuity_directives"), state.get("lore_entries", [])
         )
+        # Libro contable de anclas (spec-recursos-ancla §5.4): las referencias
+        # del paquete estampan la vigencia (first/last seen) en el catálogo en
+        # memoria; la persistencia al final de la corrida va por el mismo
+        # camino que consolida el lore (use case.save_anclas).
+        usadas = anclas_referenciadas(paquete)
+        anclas_actualizadas = registrar_vigencia_de_anclas(
+            state.get("anclas") or [], usadas, capitulo.chapter_id
+        )
+        # Cobertura blanda casting↔specs (§5.3): no rechaza; queda como
+        # hallazgo de auditoría para revisión humana.
+        directivas = state.get("continuity_directives")
+        if directivas is not None and paquete is not None:
+            sin_cobertura = cobertura_casting(directivas.anclas_del_capitulo, paquete)
+            if sin_cobertura:
+                audit.log_event(
+                    f"Cobertura de anclas de {capitulo.chapter_id}: el casting "
+                    f"declara '{', '.join(sin_cobertura)}' pero ninguna spec "
+                    "las referencia."
+                )
         logger.info(
             "Episodio commit: %s (%s) · +%d entradas de lore.",
             capitulo.chapter_id,
@@ -334,7 +356,7 @@ def build_pipeline_graph(
             f"· +{len(lore_nuevo)} entrada(s) de lore.",
             artifact=episodio,
         )
-        return {
+        actualizacion: Dict[str, Any] = {
             "completed_episodes": [episodio],
             "lore_entries": lore_nuevo,
             "current_chapter_index": indice + 1,
@@ -349,6 +371,9 @@ def build_pipeline_graph(
             # los adjuntos ya viajan dentro del episodio consolidado.
             "artefactos": {clave: None for clave in (state.get("artefactos") or {})},
         }
+        if anclas_actualizadas is not None:
+            actualizacion["anclas"] = anclas_actualizadas
+        return actualizacion
 
     def _fail_chapter(state: PipelineState) -> Dict[str, Any]:
         """Política 'skip_chapter': descarta el capítulo y registra el fallo."""

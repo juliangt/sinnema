@@ -218,10 +218,47 @@ class GenerateSeriesUseCase:
         consolidado = merge_lore(self._lore_store.load(self._project.project_id), entradas)
         self._lore_store.save(self._project.project_id, consolidado)
 
+    def save_anclas(self, state: Optional[PipelineState]) -> None:
+        """Persiste la vigencia (first/last seen) que ``commit_episode`` estampó.
+
+        Mismo camino que ``save_lore``: se llama una vez al final de la corrida
+        sobre el estado final. Solo escribe si el libro contable cambió alguna
+        ancla respecto de lo persistido (sin anclas usadas → sin escritura).
+        El resto de la biblioteca (borradores, propuestos, retiradas) pasa
+        intacta: el pipeline jamás modifica nada que no haya lockeado una
+        persona.
+        """
+        if state is None:
+            return
+        de_corrida = state.get("anclas") or []
+        if not de_corrida:
+            return
+        persistidas = self._anchor_store.load(self._project.project_id)
+        por_id = {ancla.ancla_id: ancla for ancla in de_corrida}
+        fusion: List[RecursoAncla] = []
+        cambio = False
+        for ancla in persistidas:
+            actualizada = por_id.get(ancla.ancla_id)
+            if actualizada is None:
+                fusion.append(ancla)
+                continue
+            if (actualizada.chapter_first_seen, actualizada.chapter_last_seen) != (
+                ancla.chapter_first_seen,
+                ancla.chapter_last_seen,
+            ):
+                cambio = True
+                fusion.append(actualizada)
+            else:
+                fusion.append(ancla)
+        if cambio:
+            self._anchor_store.save(self._project.project_id, fusion)
+
     def execute(self, request: SeriesRequest) -> SeriesDeliverable:
-        """Ejecuta la serie completa, persiste el lore y devuelve el entregable."""
+        """Ejecuta la serie completa, persiste lore y vigencia de anclas, y
+        devuelve el entregable."""
         estado_final: Optional[PipelineState] = None
         for estado_final in self.stream(request):
             pass
         self.save_lore(estado_final)
+        self.save_anclas(estado_final)
         return build_deliverable(estado_final)

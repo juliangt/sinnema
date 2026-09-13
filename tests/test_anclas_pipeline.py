@@ -13,12 +13,18 @@ import copy
 import pytest
 
 from sinnema.application.prompts import continuity as continuity_prompts
+from sinnema.application.prompts import director as director_prompts
 from sinnema.application.prompts import scriptwriter as scriptwriter_prompts
 from sinnema.application.requests import build_initial_state
 from sinnema.application.use_cases import GenerateSeriesUseCase
 from sinnema.domain.exceptions import DomainValidationError
-from sinnema.domain.models import AnclaDelCapitulo
-from sinnema.domain.services import validate_continuity_anchors
+from sinnema.domain.models import AnclaDelCapitulo, ReferenciaAncla, VisualAssetSpec
+from sinnema.domain.services import (
+    cobertura_casting,
+    registrar_vigencia_de_anclas,
+    validate_anchor_refs,
+    validate_continuity_anchors,
+)
 from sinnema.infrastructure.anclas import JsonAnchorStore
 
 from conftest import (
@@ -392,3 +398,337 @@ def test_grafo_rechaza_casting_sin_biblioteca_aun_con_rol_activo():
     )
     with pytest.raises(DomainValidationError, match="vacío"):
         _correr(use_case, make_request(num_chapters=1))
+
+
+# ------------- Hito 3: specs con referencias y dirección técnica -------------
+# (los tests de Hito 1/2 se conservan arriba; esta sección cubre §5.3/§5.4)
+
+
+def _paquete_con_refs(draft, refs_por_escena):
+    """Paquete válido del borrador con referencias de anclas por escena."""
+    paquete = make_package(draft)
+    specs = [
+        spec.model_copy(update={"anclas": refs_por_escena.get(spec.scene_number, [])})
+        for spec in paquete.visual_specs
+    ]
+    return paquete.model_copy(update={"visual_specs": specs})
+
+
+def _gateway_de_un_capitulo_con_paquete(directivas, paquete):
+    gw = FakeGateway()
+    plan = make_plan(1)
+    draft = make_draft("ch-01")
+    gw.add("planner", [plan])
+    gw.add("continuity", [directivas])
+    gw.add("scriptwriter", [draft])
+    gw.add("adapter", [make_adapted(draft)])
+    gw.add("critic", [make_audit(approved=True)])
+    gw.add("technical_director", [paquete])
+    return gw
+
+
+def test_spec_sin_anclas_es_compatible_y_las_conserva_si_hay():
+    spec = VisualAssetSpec(
+        scene_number=1,
+        image_prompt=(
+            "A clean isometric 3D render of a friendly robot teacher in a neon lab"
+        ),
+        negative_prompt="watermark, blurry",
+        composition="Vertical centered framing",
+        motion_direction="Slow dolly in toward the subject",
+        style_tags=["isometric", "neon", "vertical"],
+    )
+    assert spec.anclas == []
+    con_refs = spec.model_copy(
+        update={"anclas": [ReferenciaAncla(ancla_id="protagonista")]}
+    )
+    assert con_refs.anclas[0].ancla_id == "protagonista"
+    assert con_refs.anclas[0].roles == []  # vacío = batería completa del tipo
+
+
+def test_validador_de_refs_acepta_referencias_lockeadas():
+    paquete = make_package(make_draft("ch-01"))
+    validate_anchor_refs(paquete, [make_ancla("protagonista", estado="lockeado")])
+
+
+def test_validador_de_refs_rechaza_ancla_inexistente():
+    draft = make_draft("ch-01")
+    paquete = _paquete_con_refs(
+        draft, {1: [ReferenciaAncla(ancla_id="fantasma", roles=["hero_portrait"])]}
+    )
+    with pytest.raises(DomainValidationError, match="fantasma"):
+        validate_anchor_refs(paquete, [make_ancla("protagonista", estado="lockeado")])
+
+
+def test_validador_de_refs_rechaza_ancla_no_lockeada():
+    draft = make_draft("ch-01")
+    paquete = _paquete_con_refs(draft, {2: [ReferenciaAncla(ancla_id="protagonista")]})
+    with pytest.raises(DomainValidationError, match="lockeadas"):
+        validate_anchor_refs(paquete, [make_ancla("protagonista", estado="borrador")])
+
+
+def test_validador_de_refs_rechaza_sin_catalogo():
+    paquete = _paquete_con_refs(
+        make_draft("ch-01"), {3: [ReferenciaAncla(ancla_id="protagonista")]}
+    )
+    with pytest.raises(DomainValidationError, match="vacío"):
+        validate_anchor_refs(paquete, [])
+
+
+def test_cobertura_casting_reporta_solo_las_faltantes():
+    draft = make_draft("ch-01")
+    paquete = _paquete_con_refs(
+        draft,
+        {1: [ReferenciaAncla(ancla_id="protagonista")], 2: [ReferenciaAncla(ancla_id="la-nave")]},
+    )
+    casting = [
+        AnclaDelCapitulo(
+            ancla_id="protagonista",
+            tipo="personaje",
+            descriptor=DESCRIPTOR,
+            instrucciones="Protagoniza todas las escenas.",
+        ),
+        AnclaDelCapitulo(
+            ancla_id="la-nave",
+            tipo="lugar",
+            descriptor="A place descriptor",
+            instrucciones="Escenario del capítulo.",
+        ),
+        AnclaDelCapitulo(
+            ancla_id="mascota",
+            tipo="objeto",
+            descriptor="A prop descriptor",
+            instrucciones="Aparece en el cierre.",
+        ),
+    ]
+    faltantes = cobertura_casting(casting, paquete)
+    assert faltantes == ["mascota"]
+    assert cobertura_casting(casting, None) == [
+        "protagonista",
+        "la-nave",
+        "mascota",
+    ]
+
+
+def test_vigencia_primer_y_ultimo_capitulo():
+    catalogo = [
+        make_ancla("protagonista", estado="lockeado"),
+        make_ancla("la-nave", tipo="lugar", estado="lockeado"),
+    ]
+    # Capítulo 1: el protagonista se usa; el lugar no.
+    actualizado = registrar_vigencia_de_anclas(catalogo, ["protagonista"], "ch-01")
+    assert actualizado is not None
+    por_id = {a.ancla_id: a for a in actualizado}
+    assert por_id["protagonista"].chapter_first_seen == "ch-01"
+    assert por_id["protagonista"].chapter_last_seen == "ch-01"
+    assert por_id["la-nave"].chapter_first_seen is None
+
+    # Capítulo 2: solo actualiza last_seen; first_seen se conserva.
+    actualizado2 = registrar_vigencia_de_anclas(actualizado, ["protagonista"], "ch-02")
+    por_id2 = {a.ancla_id: a for a in actualizado2}
+    assert por_id2["protagonista"].chapter_first_seen == "ch-01"
+    assert por_id2["protagonista"].chapter_last_seen == "ch-02"
+
+    # Re-estampar el mismo capítulo no cambia nada: None (sin escritura).
+    assert registrar_vigencia_de_anclas(actualizado2, ["protagonista"], "ch-02") is None
+    # Sin usadas: None.
+    assert registrar_vigencia_de_anclas(catalogo, [], "ch-01") is None
+
+
+def test_prompts_del_director_con_y_sin_biblioteca():
+    proyecto = make_project()
+    borrador = make_draft("ch-01")
+    adaptado = make_adapted(borrador)
+    base = director_prompts.build_user_message(
+        proyecto,
+        chapter=make_chapter(1),
+        draft=borrador,
+        adapted=adaptado,
+        recurring_elements=["mascota Roby"],
+    )
+    con_anclas = director_prompts.build_user_message(
+        proyecto,
+        chapter=make_chapter(1),
+        draft=borrador,
+        adapted=adaptado,
+        recurring_elements=["mascota Roby"],
+        anclas=[make_ancla("protagonista", estado="lockeado")],
+        casting=_directivas_con_casting().anclas_del_capitulo,
+    )
+
+    assert base == director_prompts.build_user_message(
+        proyecto,
+        chapter=make_chapter(1),
+        draft=borrador,
+        adapted=adaptado,
+        recurring_elements=["mascota Roby"],
+        anclas=[],
+        casting=[],
+    )
+    assert "<biblioteca_de_anclas>" not in base
+    assert "<casting_del_capitulo>" not in base
+    assert "<biblioteca_de_anclas>" in con_anclas
+    assert "[personaje] protagonista" in con_anclas
+    assert DESCRIPTOR in con_anclas
+    assert "<casting_del_capitulo>" in con_anclas
+    assert "traje de laboratorio" in con_anclas
+    for tag in ("encargo_tecnico", "biblioteca_de_anclas", "casting_del_capitulo"):
+        assert con_anclas.count(f"<{tag}>") == con_anclas.count(f"</{tag}>")
+
+
+def test_system_prompt_del_director_gana_reglas_solo_con_biblioteca():
+    proyecto = make_project()
+    base = director_prompts.build_system_prompt(proyecto)
+    con_anclas = director_prompts.build_system_prompt(
+        proyecto, anclas=[make_ancla(estado="lockeado")]
+    )
+    assert "BIBLIOTECA DE ANCLAS" not in base
+    assert "ancla_id" not in base
+    assert "BIBLIOTECA DE ANCLAS" in con_anclas
+    assert "DEBE declararse en `anclas`" in con_anclas
+    assert "thumbnail_prompt" in con_anclas
+    assert con_anclas.startswith(base)
+
+
+# ---------------- Hito 3: integración en el grafo y persistencia ----------------
+
+
+def test_grafo_acepta_refs_validas_y_el_paquete_viaja_intacto_al_episodio(tmp_path):
+    store = JsonAnchorStore(root=tmp_path)
+    store.save(
+        PROJECT_ID,
+        [
+            make_ancla("protagonista", estado="lockeado"),
+            make_ancla("la-nave", tipo="lugar", estado="lockeado"),
+        ],
+    )
+    draft = make_draft("ch-01")
+    refs = {
+        1: [
+            ReferenciaAncla(ancla_id="protagonista", roles=["hero_portrait"]),
+            ReferenciaAncla(ancla_id="la-nave"),
+        ],
+        3: [ReferenciaAncla(ancla_id="protagonista")],
+    }
+    use_case = GenerateSeriesUseCase(
+        _gateway_de_un_capitulo_con_paquete(
+            _directivas_con_casting(), _paquete_con_refs(draft, refs)
+        ),
+        make_project(),
+        anchor_store=store,
+    )
+    final = _correr(use_case, make_request(num_chapters=1))
+
+    episodio = final["completed_episodes"][0]
+    # El paquete técnico del episodio conserva las referencias intactas...
+    specs = {s.scene_number: s for s in episodio.technical.visual_specs}
+    assert [r.ancla_id for r in specs[1].anclas] == ["protagonista", "la-nave"]
+    assert specs[1].anclas[0].roles == ["hero_portrait"]
+    assert specs[3].anclas[0].roles == []
+    # ...y también viajan en el adjunto serializado del director.
+    adjunto_tecnico = next(
+        a for a in episodio.adjuntos if a.rol == "technical_director"
+    )
+    serializadas = adjunto_tecnico.artefacto["visual_specs"]
+    assert serializadas[0]["anclas"][0]["ancla_id"] == "protagonista"
+    # El catálogo del estado queda vigente-estampado por el commit.
+    por_id = {a.ancla_id: a for a in final["anclas"]}
+    assert por_id["protagonista"].chapter_first_seen == "ch-01"
+    assert por_id["protagonista"].chapter_last_seen == "ch-01"
+    assert por_id["la-nave"].chapter_first_seen == "ch-01"
+
+
+def test_grafo_rechaza_paquete_con_referencia_alucinada(tmp_path):
+    store = JsonAnchorStore(root=tmp_path)
+    store.save(PROJECT_ID, [make_ancla("protagonista", estado="lockeado")])
+    paquete = _paquete_con_refs(
+        make_draft("ch-01"), {1: [ReferenciaAncla(ancla_id="fantasma")]}
+    )
+    use_case = GenerateSeriesUseCase(
+        _gateway_de_un_capitulo_con_paquete(_directivas_con_casting(), paquete),
+        make_project(),
+        anchor_store=store,
+    )
+    with pytest.raises(DomainValidationError, match="fantasma"):
+        _correr(use_case, make_request(num_chapters=1))
+
+
+def test_cobertura_blanda_queda_en_auditoria_sin_rechazar(tmp_path):
+    store = JsonAnchorStore(root=tmp_path)
+    store.save(PROJECT_ID, [make_ancla("protagonista", estado="lockeado")])
+    audit = AuditRegistrada()
+    # El paquete NO referencia al protagonista del casting: hallazgo, no fallo.
+    use_case = GenerateSeriesUseCase(
+        _gateway_de_un_capitulo_con_paquete(
+            _directivas_con_casting(), make_package(make_draft("ch-01"))
+        ),
+        make_project(),
+        audit=audit,
+        anchor_store=store,
+    )
+    final = _correr(use_case, make_request(num_chapters=1))
+    assert len(final["completed_episodes"]) == 1
+    hallazgos = [e for e in audit.eventos if "Cobertura de anclas" in e]
+    assert len(hallazgos) == 1
+    assert "protagonista" in hallazgos[0]
+
+
+def test_cobertura_completa_no_deja_hallazgo(tmp_path):
+    store = JsonAnchorStore(root=tmp_path)
+    store.save(PROJECT_ID, [make_ancla("protagonista", estado="lockeado")])
+    audit = AuditRegistrada()
+    paquete = _paquete_con_refs(
+        make_draft("ch-01"), {1: [ReferenciaAncla(ancla_id="protagonista")]}
+    )
+    use_case = GenerateSeriesUseCase(
+        _gateway_de_un_capitulo_con_paquete(_directivas_con_casting(), paquete),
+        make_project(),
+        audit=audit,
+        anchor_store=store,
+    )
+    _correr(use_case, make_request(num_chapters=1))
+    assert [e for e in audit.eventos if "Cobertura de anclas" in e] == []
+
+
+def test_save_anclas_persiste_la_vigencia_y_no_escribe_si_no_hubo_cambios(tmp_path):
+    store = JsonAnchorStore(root=tmp_path)
+    store.save(PROJECT_ID, [make_ancla("protagonista", estado="lockeado")])
+    paquete = _paquete_con_refs(
+        make_draft("ch-01"), {2: [ReferenciaAncla(ancla_id="protagonista")]}
+    )
+    use_case = GenerateSeriesUseCase(
+        _gateway_de_un_capitulo_con_paquete(
+            _directivas_con_casting(), paquete
+        ),
+        make_project(),
+        anchor_store=store,
+    )
+    use_case.execute(make_request(num_chapters=1))
+
+    persistida = {a.ancla_id: a for a in store.load(PROJECT_ID)}
+    assert persistida["protagonista"].chapter_first_seen == "ch-01"
+    assert persistida["protagonista"].chapter_last_seen == "ch-01"
+    version = persistida["protagonista"].version
+
+    # Segunda corrida SIN referencias: sin anclas usadas → sin escritura.
+    use_case_sin_uso = GenerateSeriesUseCase(
+        _gateway_de_un_capitulo_con_paquete(
+            _directivas_con_casting(), make_package(make_draft("ch-01"))
+        ),
+        make_project(),
+        anchor_store=store,
+    )
+    use_case_sin_uso.execute(make_request(num_chapters=1))
+    persistida2 = {a.ancla_id: a for a in store.load(PROJECT_ID)}
+    assert persistida2["protagonista"].chapter_last_seen == "ch-01"
+    assert persistida2["protagonista"].version == version
+
+
+def test_save_anclas_sin_catalogo_no_escribe_nada(tmp_path):
+    store = JsonAnchorStore(root=tmp_path)
+    use_case = GenerateSeriesUseCase(
+        gateway_con_serie(num_chapters=1), make_project(), anchor_store=store
+    )
+    use_case.execute(make_request(num_chapters=1))
+    assert store.load(PROJECT_ID) == []
+    assert not (tmp_path / PROJECT_ID / "anclas.json").exists()

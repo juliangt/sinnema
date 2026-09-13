@@ -334,6 +334,7 @@ def main() -> int:
         return 1
 
     use_case.save_lore(estado_final)
+    use_case.save_anclas(estado_final)
 
     ruta = Path(args.output or f"salidas/{proyecto.project_id}/serie_{marca}.json")
     ruta.parent.mkdir(parents=True, exist_ok=True)

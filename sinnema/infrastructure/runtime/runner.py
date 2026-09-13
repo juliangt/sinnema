@@ -272,6 +272,7 @@ class SeriesWorker:
                 sink("progress", describe_progress(paso, estado_final))
             deliverable = build_deliverable(estado_final)
             use_case.save_lore(estado_final)
+            use_case.save_anclas(estado_final)
             return deliverable.model_dump(mode="json")
         finally:
             conn.close()

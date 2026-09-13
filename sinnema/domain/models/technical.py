@@ -11,6 +11,7 @@ from sinnema.domain.constants import (
     SCENES_UNIVERSAL_MAX_COUNT,
     SCENES_UNIVERSAL_MIN_COUNT,
 )
+from sinnema.domain.models.anclas import ReferenciaAncla
 from sinnema.domain.text import contains_spanish_characters
 
 
@@ -40,6 +41,11 @@ class VisualAssetSpec(BaseModel):
         description="Dirección de cámara y movimiento para el modelo de video (EN INGLÉS).",
     )
     style_tags: List[str] = Field(..., min_length=3, max_length=10)
+    #: Anclas citadas por esta escena (spec-recursos-ancla §5.3): entidades con
+    #: apariencia fija presentes aquí. Default vacío = escena sin anclados
+    #: (o proyecto sin biblioteca): compatible con specs y corridas previas.
+    #: Los validadores de aplicación verifican existencia y lock (§11.2).
+    anclas: List[ReferenciaAncla] = Field(default_factory=list)
 
     @field_validator("image_prompt")
     @classmethod

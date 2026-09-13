@@ -70,6 +70,7 @@ from sinnema.domain.services import (
     identity_adaptation,
     validate_adaptation_format,
     validate_adaptation_matches_draft,
+    validate_anchor_refs,
     validate_audit_verdict,
     validate_continuity_anchors,
     validate_draft_format,
@@ -217,12 +218,15 @@ def _mensaje_director(project: ProjectSpec, state: PipelineState) -> str:
         # Flujo sin transformaciones aguas arriba: el director traduce el
         # borrador con adaptación identidad (determinista, sin LLM).
         adaptado = identity_adaptation(state["draft_script"])
+    directivas = state.get("continuity_directives")
     return director_prompts.build_user_message(
         project,
         chapter=capitulo,
         draft=state["draft_script"],
         adapted=adaptado,
         recurring_elements=plan.recurring_elements,
+        anclas=state.get("anclas") or [],
+        casting=directivas.anclas_del_capitulo if directivas else [],
     )
 
 
@@ -467,11 +471,17 @@ AGENT_REGISTRY: Dict[str, AgentDefinition] = {
         mensaje=_mensaje_director,
         consume=(
             "series_plan", "current_chapter_index",
-            "draft_script", "adapted_script",
+            "draft_script", "adapted_script", "continuity_directives", "anclas",
         ),
-        validadores=(_validar_paquete_coherente,
-                     lambda art, project, state: validate_package_format(
-                         art, project.format)),
+        validadores=(
+            _validar_paquete_coherente,
+            lambda art, project, state: validate_package_format(
+                art, project.format
+            ),
+            lambda paquete, project, state: validate_anchor_refs(
+                paquete, state.get("anclas") or []
+            ),
+        ),
         al_desactivar=_desactivar_director,
         resumen_desactivado=_resumen_desactivar_director,
         resumen=_resumen_director,
