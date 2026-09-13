@@ -1,27 +1,45 @@
-"""Fábrica del puerto de media: elige el adaptador de imagen por nombre.
+"""Fábrica del puerto de media: elige el adaptador de imagen por nombre y
+arma las dependencias completas por proyecto (wiring del Hito 3).
 
 El nombre viene de ``[media].proveedor_imagen`` del TOML (``gemini`` |
 ``openai``) o del default del entorno (``MEDIA_PROVIDER`` → ``gemini``, el
-wiring fino vive en la composición raíz). Devuelve SIEMPRE un adaptador
-construido: sin claves ni SDK el objeto existe y falla con error accionable
-al usarse (degradación elegante §6, como los proveedores LLM).
+mismo patrón que ``LLM_PROVIDER_<ROL>``); los reintentos de transporte se
+afinan con ``MEDIA_MAX_INTENTOS``. Devuelve SIEMPRE un adaptador construido:
+sin claves ni SDK el objeto existe y falla con error accionable al usarse
+(degradación elegante §6, como los proveedores LLM).
+
+``construir_dependencias_de_media`` es el punto único de wiring (CLI y
+server): con ``[media].keyframes`` distinto de true devuelve ``None`` y NI
+SIQUIERA se construye un adaptador — cero impacto en corridas sin media.
 """
 from __future__ import annotations
 
+import logging
+import os
 from typing import Optional
 
-from sinnema.application.ports import MediaGenerationPort
+from sinnema.application.ports import DependenciasMedia, MediaGenerationPort
+from sinnema.application.projects import ProjectSpec
+from sinnema.infrastructure.anclas import JsonAnchorStore
+from sinnema.infrastructure.media.almacen import AlmacenMedia
 from sinnema.infrastructure.media.base import AdaptadorImagenBase
 from sinnema.infrastructure.media.gemini import AdaptadorGeminiImage
 from sinnema.infrastructure.media.openai import AdaptadorOpenAIImage
-from sinnema.infrastructure.media.resolver import CargarImagenDeBateria
+from sinnema.infrastructure.media.resolver import (
+    CargarImagenDeBateria,
+)
 from sinnema.infrastructure.media.transporte import PoliticaReintentos
+
+logger = logging.getLogger("sinnema.media.fabrica")
 
 #: Proveedores de imagen soportados por la Fase 3 (catálogo de la API §9.1).
 PROVEEDORES_DE_IMAGEN = ("gemini", "openai")
 
 #: Default del entorno cuando ni el TOML ni ``MEDIA_PROVIDER`` dicen nada.
 PROVEEDOR_DEFAULT = "gemini"
+
+#: Reintentos de transporte por defecto (``MEDIA_MAX_INTENTOS`` los ajusta).
+INTENTOS_DEFAULT = 3
 
 _ADAPTADORES = {
     AdaptadorGeminiImage.PROVEEDOR: AdaptadorGeminiImage,
@@ -41,6 +59,75 @@ def resolver_proveedor(proveedor_toml: Optional[str], entorno: Optional[str]) ->
             f"(recibido: '{elegido}')."
         )
     return elegido
+
+
+def cargador_de_baterias(anchor_store: JsonAnchorStore) -> CargarImagenDeBateria:
+    """Cargador de imágenes de batería sobre el almacén de anclas (Fase 1):
+    ruta validada anti-traversal y lectura de bytes en el momento del render."""
+    def cargar(project_id: str, ancla_id: str, archivo: str) -> bytes:
+        return anchor_store.ruta_imagen(project_id, ancla_id, archivo).read_bytes()
+
+    return cargar
+
+
+def politica_del_entorno() -> PoliticaReintentos:
+    """``MEDIA_MAX_INTENTOS`` (default 3): un valor no numérico no tumba el
+    arranque — se registra y rige el default (mismo espíritu que el worker)."""
+    bruto = os.getenv("MEDIA_MAX_INTENTOS", "").strip()
+    if not bruto:
+        return PoliticaReintentos(max_retries=INTENTOS_DEFAULT)
+    try:
+        max_retries = int(bruto)
+    except ValueError:
+        logger.warning(
+            "MEDIA_MAX_INTENTOS='%s' no es un entero: se usa %d.", bruto,
+            INTENTOS_DEFAULT,
+        )
+        return PoliticaReintentos(max_retries=INTENTOS_DEFAULT)
+    if max_retries < 1:
+        logger.warning(
+            "MEDIA_MAX_INTENTOS=%d es menor que 1: se usa %d.", max_retries,
+            INTENTOS_DEFAULT,
+        )
+        return PoliticaReintentos(max_retries=INTENTOS_DEFAULT)
+    return PoliticaReintentos(max_retries=max_retries)
+
+
+def construir_dependencias_de_media(
+    proyecto: ProjectSpec,
+    almacen: AlmacenMedia,
+    anchor_store: JsonAnchorStore,
+    eventos=None,
+) -> Optional[DependenciasMedia]:
+    """Wiring completo de la capa de media para UN proyecto (§6/Hito 3).
+
+    Solo si ``[media].keyframes = true``: construye el puerto del proveedor
+    elegido (TOML > ``MEDIA_PROVIDER`` > gemini) con reintentos de
+    ``MEDIA_MAX_INTENTOS`` y el cargador de baterías sobre ``anchor_store``.
+    En cualquier otro caso devuelve ``None``: el nodo ``render_keyframes``
+    ni se inserta y ningún adaptador se instancia.
+    """
+    if not proyecto.media.keyframes:
+        return None
+    proveedor = resolver_proveedor(
+        proyecto.media.proveedor_imagen, os.getenv("MEDIA_PROVIDER")
+    )
+    puerto = construir_puerto_de_media(
+        proveedor,
+        proyecto.project_id,
+        cargador_de_baterias(anchor_store),
+        retry_policy=politica_del_entorno(),
+    )
+    logger.info(
+        "Media activo para '%s': keyframes con proveedor '%s' (encadenado: %s).",
+        proyecto.project_id, proveedor, proyecto.media.encadenar_frames,
+    )
+    return DependenciasMedia(
+        puerto=puerto,
+        almacen=almacen,
+        eventos=eventos,
+        proveedor=proveedor,
+    )
 
 
 def construir_puerto_de_media(

@@ -47,6 +47,7 @@ from sinnema.infrastructure.audit import FilesystemAuditTrail
 from sinnema.infrastructure.anclas import JsonAnchorStore
 from sinnema.infrastructure.llm.gateway import build_gateway
 from sinnema.infrastructure.lore import JsonLoreStore
+from sinnema.infrastructure.media import AlmacenMedia, construir_dependencias_de_media
 from sinnema.infrastructure.projects import list_projects, load_project
 
 logger = logging.getLogger("sinnema.main")
@@ -297,13 +298,20 @@ def main() -> int:
     audit = FilesystemAuditTrail(carpeta_auditoria)
     lore_store = JsonLoreStore()
 
+    # Capa de media (spec-recursos-ancla §6): SOLO se instancia si el proyecto
+    # declaró [media].keyframes = true; sin media, None (grafo intacto).
+    anchor_store = JsonAnchorStore()
+    media = construir_dependencias_de_media(
+        proyecto, almacen=AlmacenMedia(), anchor_store=anchor_store,
+    )
+
     settings = PipelineSettings(
         max_critique_attempts=args.max_critique_attempts,
         retry_exhaustion_policy=proyecto.pipeline.politica_al_agotar or "force_accept",
     )
     use_case = GenerateSeriesUseCase(
         gateway, proyecto, settings, audit=audit, lore_store=lore_store,
-        anchor_store=JsonAnchorStore(),
+        anchor_store=anchor_store, media=media,
     )
 
     print(

@@ -84,6 +84,11 @@ from sinnema.infrastructure.llm.providers import (
     resolve_role_spec,
 )
 from sinnema.infrastructure.lore import JsonLoreStore
+from sinnema.infrastructure.media import (
+    PROVEEDORES_DE_IMAGEN,
+    AlmacenMedia,
+    construir_dependencias_de_media,
+)
 from sinnema.infrastructure.projects import (
     ProjectFileStore,
     packaged_projects_dir,
@@ -320,6 +325,10 @@ def create_app(
             escribible,
             builtin_dir=empaquetado if empaquetado != escribible else None,
         )
+    lore_store = JsonLoreStore(root=data_dir / "continuidad")
+    # Biblioteca de recursos ancla bajo el mismo raíz de datos (spec-recursos-
+    # ancla §4.2): la lee el CRUD (Fase 1) y el cargador de baterías del media.
+    anchor_store = JsonAnchorStore(root=data_dir / "anclas")
     worker = worker or SeriesWorker(
         store,
         checkpoint_dir=data_dir / "checkpoints",
@@ -328,11 +337,16 @@ def create_app(
         anchor_root=data_dir / "anclas",
         project_loader=project_store.load,
         spec_reader=project_store.read_raw,
+        # Capa de media (spec-recursos-ancla §6, Fase 3): el factory devuelve
+        # None salvo que el proyecto declare [media].keyframes = true — sin
+        # media, ni siquiera se instancia un adaptador. Los eventos en vivo
+        # los conecta el runner (sink del job → SSE).
+        media_factory=lambda proyecto: construir_dependencias_de_media(
+            proyecto,
+            almacen=AlmacenMedia(root=data_dir / "media"),
+            anchor_store=anchor_store,
+        ),
     )
-    lore_store = JsonLoreStore(root=data_dir / "continuidad")
-    # Biblioteca de recursos ancla bajo el mismo raíz de datos (spec-recursos-
-    # ancla §4.2); la API CRUD sobre ella llega en la Fase 1.
-    anchor_store = JsonAnchorStore(root=data_dir / "anclas")
     worker.start()
 
     app = FastAPI(title="Sinnema", version="0.1.0",
@@ -776,10 +790,10 @@ def create_app(
 
         Proveedores con sus modelos sugeridos (los que usan los defaults del
         sistema), tools integradas, hitos del pipeline, vocabulario de los
-        agentes custom (tipos, contratos, entradas) y catálogos de la
+        agentes custom (tipos, contratos, entradas), catálogos de la
         biblioteca de anclas (tipos, estados, roles por tipo y batería mínima
-        de lock, spec-recursos-ancla §9.1; los proveedores de media llegan con
-        su fase).
+        de lock, spec-recursos-ancla §9.1) y proveedores de imagen de la capa
+        de media (Fase 3).
         """
         modelos: Dict[str, List[str]] = {proveedor: [] for proveedor in PROVEEDORES}
         for spec in (*DEFAULT_ROLE_SPECS, DEFAULT_CUSTOM_ROLE_SPEC):
@@ -796,6 +810,7 @@ def create_app(
             "tipos_custom": list(TIPOS_CUSTOM),
             "contratos": sorted(CONTRATOS_VALIDOS),
             "entradas_custom": sorted(CATALOGO_ENTRADAS),
+            "proveedores_imagen": list(PROVEEDORES_DE_IMAGEN),
             "anclas": {
                 "tipos": list(TIPOS_DE_ANCLA),
                 "estados": list(ESTADOS_DE_ANCLA),

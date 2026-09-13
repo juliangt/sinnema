@@ -10,9 +10,13 @@ from sinnema.infrastructure.media.almacen import (
     AlmacenMedia,
 )
 from sinnema.infrastructure.media.fabrica import (
+    INTENTOS_DEFAULT,
     PROVEEDOR_DEFAULT,
     PROVEEDORES_DE_IMAGEN,
+    cargador_de_baterias,
+    construir_dependencias_de_media,
     construir_puerto_de_media,
+    politica_del_entorno,
     resolver_proveedor,
 )
 from sinnema.infrastructure.media.gemini import AdaptadorGeminiImage
@@ -31,12 +35,16 @@ __all__ = [
     "AdaptadorOpenAIImage",
     "AlmacenMedia",
     "DEFAULT_MEDIA_ROOT",
+    "INTENTOS_DEFAULT",
     "PoliticaReintentos",
     "PROVEEDOR_DEFAULT",
     "PROVEEDORES_DE_IMAGEN",
     "ReferenciaResuelta",
     "ResolverDeBateria",
+    "cargador_de_baterias",
     "con_reintentos",
+    "construir_dependencias_de_media",
     "construir_puerto_de_media",
+    "politica_del_entorno",
     "resolver_proveedor",
 ]
