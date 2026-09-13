@@ -732,3 +732,21 @@ def test_save_anclas_sin_catalogo_no_escribe_nada(tmp_path):
     use_case.execute(make_request(num_chapters=1))
     assert store.load(PROJECT_ID) == []
     assert not (tmp_path / PROJECT_ID / "anclas.json").exists()
+
+
+def test_lore_enlazado_por_cruce_con_anclas_lockeadas(tmp_path):
+    """§4.4: un término nuevo que coincide con el nombre de un ancla lockeada
+    entra al lore con ancla_id y categoría mapeada (cruce determinista)."""
+    store = JsonAnchorStore(root=tmp_path)
+    store.save(PROJECT_ID, [make_ancla("protagonista", estado="lockeado")])
+    directivas = make_directives(new_terms=("Protagonista",))
+    use_case = GenerateSeriesUseCase(
+        _gateway_de_un_capitulo(directivas), make_project(), anchor_store=store
+    )
+    entregable = use_case.execute(make_request(num_chapters=1))
+
+    enlazadas = [e for e in entregable.lore_glossary if e.ancla_id is not None]
+    assert len(enlazadas) == 1
+    assert enlazadas[0].term == "Protagonista"
+    assert enlazadas[0].ancla_id == "protagonista"
+    assert enlazadas[0].category == "personaje"

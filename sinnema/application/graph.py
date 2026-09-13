@@ -322,7 +322,10 @@ def build_pipeline_graph(
             adjuntos=_adjuntos_del_estado(state, paquete=paquete, dictamen=dictamen),
         )
         lore_nuevo = extract_new_lore(
-            capitulo, state.get("continuity_directives"), state.get("lore_entries", [])
+            capitulo,
+            state.get("continuity_directives"),
+            state.get("lore_entries", []),
+            anclas=state.get("anclas") or [],
         )
         # Libro contable de anclas (spec-recursos-ancla §5.4): las referencias
         # del paquete estampan la vigencia (first/last seen) en el catálogo en

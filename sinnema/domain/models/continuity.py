@@ -1,7 +1,7 @@
 """Continuidad y memoria de lore de la serie."""
 from __future__ import annotations
 
-from typing import List, Literal
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -17,6 +17,10 @@ class LoreEntry(BaseModel):
     chapter_id: str = Field(..., description="Capítulo donde se introdujo por primera vez.")
     first_seen_title: str = Field(..., description="Título del capítulo de origen.")
     category: Literal["concepto", "termino", "personaje", "referencia", "formato"] = "concepto"
+    #: Enlace opcional con la biblioteca de anclas (spec-recursos-ancla §4.4):
+    #: la extracción de lore lo estampa cuando un término nuevo coincide con
+    #: el nombre de una ancla lockeada del proyecto (cruce determinista).
+    ancla_id: Optional[str] = None
 
     @field_validator("term")
     @classmethod
