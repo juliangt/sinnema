@@ -17,6 +17,7 @@ import logging
 import queue
 import sqlite3
 import threading
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -75,6 +76,7 @@ class SeriesWorker:
         gateway_factory: Optional[Callable[["ProjectSpec"], object]] = None,
         project_loader: Optional[Callable[[str], ProjectSpec]] = None,
         spec_reader: Optional[Callable[[str], dict]] = None,
+        media_factory: Optional[Callable[["ProjectSpec"], object]] = None,
     ) -> None:
         self._store = store
         self._checkpoint_dir = Path(checkpoint_dir)
@@ -89,6 +91,10 @@ class SeriesWorker:
         #: Lector del dict TOML crudo, para congelar la huella del spec al
         #: arrancar (§11.4); None (CLI) = sin fingerprint.
         self._spec_reader = spec_reader
+        #: Fábrica de dependencias de media (spec-recursos-ancla §6): con
+        #: ``[media].keyframes`` devuelve puerto+almacén; ``None`` o ``None``
+        #: de retorno = corrida sin media (nodo fuera del grafo).
+        self._media_factory = media_factory
         self._queue: "queue.Queue[str]" = queue.Queue()
         self._thread: Optional[threading.Thread] = None
 
@@ -239,6 +245,40 @@ class SeriesWorker:
             except (TypeError, ValueError):
                 pass
             gateway = self._gateway_factory(proyecto, **kwargs)
+
+            # Media (spec-recursos-ancla §6): las dependencias se resuelven
+            # POR PROYECTO (solo si [media].keyframes) y el canal de eventos
+            # en vivo se conecta al store del job: media_start/media_end
+            # fluyen al SSE por el mismo camino que token/tool_*.
+            media = self._media_factory(proyecto) if self._media_factory else None
+            if media is not None:
+
+                def sink_media(evento: dict) -> None:
+                    tipo = evento.get("tipo", "media")
+                    escena = evento.get("escena")
+                    if "error" in evento:
+                        mensaje = (
+                            f"Escena {escena} queda sin keyframe: "
+                            f"{evento.get('error')}"
+                        )
+                    elif "archivo" in evento:
+                        mensaje = (
+                            f"Keyframe de la escena {escena}: "
+                            f"{evento.get('archivo')}"
+                        )
+                    else:
+                        mensaje = (
+                            f"Generando keyframe de la escena {escena} "
+                            f"({evento.get('proveedor', 'media')})..."
+                        )
+                    sink(
+                        tipo,
+                        mensaje,
+                        payload={k: v for k, v in evento.items() if k != "tipo"},
+                    )
+
+                media = replace(media, eventos=sink_media)
+
             use_case = GenerateSeriesUseCase(
                 gateway, proyecto,
                 settings=PipelineSettings(
@@ -248,7 +288,7 @@ class SeriesWorker:
                     ),
                 ),
                 audit=audit, lore_store=lore_store, anchor_store=anchor_store,
-                checkpointer=checkpointer,
+                checkpointer=checkpointer, media=media,
             )
             # Eventos por nodo (§7.2): el use case reporta qué nodos corrieron
             # por superstep y el runner los publica como node_start/node_end

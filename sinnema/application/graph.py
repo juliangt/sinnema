@@ -13,6 +13,8 @@ Topología del grafo se resuelve desde el flujo efectivo del proyecto
             |-- approve ---> enriquecedores | commit
             |-- skip_chapter -> fail_chapter (reintentos agotados))?
       -> [enriquecedores]*                  (Visual/Audio Director, ...)
+      -> render_keyframes                   (media: keyframes por escena; SOLO
+                                             si [media].keyframes = true)
       -> commit_episode                     (consolida episodio + actualiza lore)
            |-- next_chapter ---> primer nodo del capítulo
            |-- series_complete -> END
@@ -48,9 +50,11 @@ from sinnema.application.ports import (
     ROLE_PLANNER,
     ROLE_SCRIPTWRITER,
     AuditTrailPort,
+    DependenciasMedia,
     NullAuditTrail,
     StructuredGenerationPort,
 )
+from sinnema.application.nodos_media import make_render_keyframes_node
 from sinnema.application.projects import ProjectSpec, resolver_flujo
 from sinnema.application.registry import (
     AGENT_REGISTRY,
@@ -192,6 +196,7 @@ def build_pipeline_graph(
     audit: Optional[AuditTrailPort] = None,
     checkpointer: Optional[BaseCheckpointSaver] = None,
     anclas: Optional[List[RecursoAncla]] = None,
+    media: Optional[DependenciasMedia] = None,
 ) -> CompiledStateGraph:
     """Compone y compila el grafo de estado cíclico para un proyecto.
 
@@ -200,7 +205,11 @@ def build_pipeline_graph(
     ``anclas`` es la biblioteca lockeada del proyecto (spec-recursos-ancla
     §5.1): presente y no vacía, los system prompts de los roles con conciencia
     visual componen sus reglas de identidad fija; ausente, los prompts son
-    exactamente los de siempre.
+    exactamente los de siempre. ``media`` (§6) es el paquete puerto+almacén
+    de la capa de media: presente JUNTO con ``[media].keyframes = true``,
+    entre el enriquecimiento y el commit se inserta el nodo estructural
+    ``render_keyframes``; ausente o con keyframes off, la topología es la de
+    siempre (paridad).
     """
     settings = settings or PipelineSettings()
     audit = audit or NullAuditTrail()
@@ -466,6 +475,19 @@ def build_pipeline_graph(
     workflow = StateGraph(PipelineState)
     workflow.add_node("plan_series", _plan_series)
 
+    # Capa de media (§6): el nodo estructural solo participa con keyframes
+    # activados Y dependencias inyectadas; en otro caso la topología (y el
+    # límite de recursión) es byte a byte la de siempre.
+    usar_media = media is not None and project.media.keyframes
+    destino_commit = "commit_episode"
+    if usar_media:
+        workflow.add_node(
+            "render_keyframes",
+            make_render_keyframes_node(project, media, audit),
+        )
+        workflow.add_edge("render_keyframes", "commit_episode")
+        destino_commit = "render_keyframes"
+
     if flujo.hasta == "plan":
         # Sin bucle de capítulos: planificar la serie y consolidar el outline.
         workflow.add_edge(START, "plan_series")
@@ -521,7 +543,9 @@ def build_pipeline_graph(
             _route_after_critic,
             {
                 "revise": nodo_escritor,
-                "approve": primero or "commit_episode",
+                # Con media y sin enriquecedores, el approve pasa por el nodo
+                # de keyframes antes del commit.
+                "approve": primero or destino_commit,
                 "skip_chapter": "fail_chapter",
             },
         )
@@ -538,7 +562,7 @@ def build_pipeline_graph(
 
     workflow.add_node("commit_episode", _commit_episode)
     if cursor is not None:
-        workflow.add_edge(cursor, "commit_episode")
+        workflow.add_edge(cursor, destino_commit)
 
     if flujo.revisor is not None:
         workflow.add_node("fail_chapter", _fail_chapter)

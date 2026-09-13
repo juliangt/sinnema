@@ -10,6 +10,7 @@ from sinnema.application.graph import build_pipeline_graph
 from sinnema.application.ports import (
     AnchorStorePort,
     AuditTrailPort,
+    DependenciasMedia,
     LoreStorePort,
     NullAnchorStore,
     NullAuditTrail,
@@ -61,12 +62,19 @@ def build_deliverable(state: Optional[PipelineState]) -> SeriesDeliverable:
     )
 
 
-def limite_de_recursion(flujo, num_chapters: int, max_attempts: int) -> int:
+def limite_de_recursion(
+    flujo,
+    num_chapters: int,
+    max_attempts: int,
+    media: bool = False,
+) -> int:
     """Margen de pasos del grafo, derivado del flujo efectivo (§6.3).
 
     ``pasos_por_capitulo`` cubre el camino mínimo (contextos -> escritor ->
     transformaciones -> compuerta -> enriquecedores -> commit) y
     ``extra_por_reintento`` el ciclo de crítica (escritor -> ... -> revisor).
+    Con la capa de media activa (``media = True``), ``render_keyframes`` suma
+    un paso por capítulo.
     """
     pasos_por_capitulo = (
         len(flujo.contexto)
@@ -74,6 +82,7 @@ def limite_de_recursion(flujo, num_chapters: int, max_attempts: int) -> int:
         + len(flujo.transformaciones)
         + (1 if flujo.revisor is not None else 0)
         + len(flujo.enriquecimiento)
+        + (1 if media else 0)  # render_keyframes
         + 1  # commit
     )
     extra_por_reintento = 1 + len(flujo.transformaciones) + 1  # escritor->..->revisor
@@ -96,12 +105,16 @@ class GenerateSeriesUseCase:
         lore_store: Optional[LoreStorePort] = None,
         anchor_store: Optional[AnchorStorePort] = None,
         checkpointer: Optional[BaseCheckpointSaver] = None,
+        media: Optional[DependenciasMedia] = None,
     ) -> None:
         self._project = project
         self._settings = settings or PipelineSettings()
         self._audit = audit or NullAuditTrail()
         self._lore_store: LoreStorePort = lore_store or NullLoreStore()
         self._anchor_store: AnchorStorePort = anchor_store or NullAnchorStore()
+        #: Capa de media (spec-recursos-ancla §6): ``None`` = corrida sin
+        #: media (nodo ``render_keyframes`` fuera del grafo: paridad).
+        self._media = media
         # La biblioteca de anclas vive ANTES de la corrida (spec-recursos-ancla
         # §4.2): se carga una sola vez aquí y se siembra como catálogo fijo.
         # Solo participan las lockeadas (y nunca retiradas); un proyecto con
@@ -110,6 +123,7 @@ class GenerateSeriesUseCase:
         self._graph = build_pipeline_graph(
             gateway, project, self._settings, audit=self._audit,
             checkpointer=checkpointer, anclas=self._anclas_lockeadas,
+            media=self._media,
         )
 
     def _cargar_anclas_lockeadas(self) -> List[RecursoAncla]:
@@ -124,13 +138,14 @@ class GenerateSeriesUseCase:
         ]
 
     @staticmethod
-    def _recursion_limit(request: SeriesRequest) -> int:
+    def _recursion_limit(request: SeriesRequest, media: bool = False) -> int:
         """Margen de pasos del grafo: fórmula generalizada desde el flujo
         efectivo del proyecto (plan + capítulos + ciclos de crítica)."""
         return limite_de_recursion(
             resolver_flujo(request.project),
             request.num_chapters,
             request.max_critique_attempts,
+            media=media,
         )
 
     def stream(
@@ -190,7 +205,10 @@ class GenerateSeriesUseCase:
             initial_anclas=self._anclas_lockeadas,
         )
         config: Dict[str, Any] = {
-            "recursion_limit": self._recursion_limit(request)
+            "recursion_limit": self._recursion_limit(
+                request,
+                media=self._media is not None and request.project.media.keyframes,
+            )
         }
         if thread_id is not None:
             config["thread_id"] = thread_id

@@ -22,15 +22,23 @@ from sinnema.domain.services.format import (
     validate_plan_format,
 )
 from sinnema.domain.services.lore import extract_new_lore, merge_lore
+from sinnema.domain.services.media import (
+    componer_pedido_escena,
+    componer_prompt_final,
+    pares_identidad_primero,
+)
 
 __all__ = [
     "anclas_referenciadas",
     "assemble_episode",
     "build_failed_record",
     "cobertura_casting",
+    "componer_pedido_escena",
+    "componer_prompt_final",
     "extract_new_lore",
     "identity_adaptation",
     "merge_lore",
+    "pares_identidad_primero",
     "registrar_vigencia_de_anclas",
     "validate_adaptation_format",
     "validate_adaptation_matches_draft",

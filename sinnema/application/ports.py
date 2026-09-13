@@ -228,12 +228,15 @@ class DependenciasMedia:
     ``render_keyframes`` ni se inserta: paridad con el pipeline de siempre).
     ``eventos`` es el canal en vivo de progreso: el nodo emite
     ``{"tipo": "media_start"|"media_end", "escena": n, "proveedor": ...}`` y
-    el runner lo traduce a los eventos del job que llegan a SSE.
+    el runner lo traduce a los eventos del job que llegan a SSE. ``proveedor``
+    es el nombre del adaptador ("gemini"/"openai"): puramente informativo
+    (eventos y auditoría).
     """
 
     puerto: MediaGenerationPort
     almacen: MediaStorePort
     eventos: Optional[Callable[[Dict[str, Any]], None]] = None
+    proveedor: str = ""
 
 
 class StructuredGenerationPort(Protocol):
